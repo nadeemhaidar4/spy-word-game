@@ -1,5 +1,5 @@
-/* QuickSave Service Worker v8.5 */
-const CACHE_NAME = "quicksave-v8.5.0";
+/* QuickSave Service Worker v8.6 */
+const CACHE_NAME = "quicksave-v8.6.0";
 
 const STATIC_FILES = [
   "/", "/index.html", "/styles.css", "/app.js",
@@ -56,7 +56,10 @@ async function networkFirst(req) {
 /* ── Messages ── */
 self.addEventListener("message", event => {
   const { type, data } = event.data || {};
-  if (type === "SKIP_WAITING") { self.skipWaiting(); return; }
+  if (type === "SKIP_WAITING") {
+    self.skipWaiting();
+    return;
+  }
   if (type === "BG_DOWNLOAD") {
     event.waitUntil(handleBgDownload(data));
   }
@@ -102,8 +105,11 @@ async function handleBgDownload({ url: pageUrl, id: dlId }) {
 
     console.log("[SW] Downloaded:", (fileBytes.byteLength/1024/1024).toFixed(1)+"MB");
 
-    /* Step 3: Send to client directly */
-    const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    /* Step 3: Send to client - client blob download karega */
+    const clients = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: true
+    });
 
     for (const client of clients) {
       if (new URL(client.url).origin === self.location.origin) {
