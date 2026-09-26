@@ -11,7 +11,7 @@ const { execFile } = require("child_process");
 const app = express();
 
 const PORT = process.env.PORT || 10000;
-const MAX_BYTES = 100 * 1024 * 1024;
+const MAX_BYTES = 200 * 1024 * 1024; // 200MB max
 const INSPECT_TIMEOUT = 90000;
 const DOWNLOAD_TIMEOUT = 300000;
 const MAX_REDIRECTS = 4;
@@ -232,23 +232,16 @@ function isSupportedUrl(urlStr) {
 
 /* ════════════════════════════════════════
    EXTRACT URL FROM TEXT
-   Jab share mein plain text aaye jo URL ho
 ════════════════════════════════════════ */
 function extractUrlFromText(text) {
   if (!text) return null;
   text = text.trim();
-
-  /* Already valid URL hai */
   if (text.startsWith("http://") || text.startsWith("https://")) {
-    /* Sirf pehla URL lo agar multiple hain */
     const match = text.match(/https?:\/\/[^\s]+/);
     return match ? match[0] : text;
   }
-
-  /* Text mein URL dhundho */
   const match = text.match(/https?:\/\/[^\s]+/);
   if (match) return match[0];
-
   return null;
 }
 
@@ -292,6 +285,24 @@ function getYtdlpBinary() {
 const YTDLP_BINARY = getYtdlpBinary();
 
 /* ════════════════════════════════════════
+   ffmpeg CHECK
+════════════════════════════════════════ */
+function checkFfmpeg() {
+  const locations = [
+    "/usr/local/bin/ffmpeg",
+    "/usr/bin/ffmpeg",
+    process.env.FFMPEG_PATH
+  ].filter(Boolean);
+  for (const loc of locations) {
+    try { if (fs.existsSync(loc)) return loc; } catch {}
+  }
+  return null;
+}
+const FFMPEG_PATH = checkFfmpeg();
+console.log(`[init] ffmpeg: ${FFMPEG_PATH || "NOT FOUND"}`);
+console.log(`[init] yt-dlp: ${YTDLP_BINARY}`);
+
+/* ════════════════════════════════════════
    yt-dlp RUNNER
 ════════════════════════════════════════ */
 function runYtdlp(url, extraArgs, timeoutMs=60000) {
@@ -322,185 +333,310 @@ function runYtdlp(url, extraArgs, timeoutMs=60000) {
 }
 
 /* ════════════════════════════════════════
-   FORMAT PARSER
+   FORMAT PARSER - AUDIO FIX
+   
+   Priority order:
+   1. Single URL with both video+audio (best)
+   2. Format with acodec != none
+   3. Highest filesize format (usually has audio)
+   
+   NEVER select video-only streams
 ════════════════════════════════════════ */
 function parseYtdlpOutput(output) {
   if (!output) return null;
-  let directUrl = null, headers = {};
 
-  function selectBestFormat(formats) {
+  /* ── Helper: Format mein audio hai? ── */
+  function hasAudio(f) {
+    return f.acodec && f.acodec !== "none" && f.acodec !== "null";
+  }
+  function hasVideo(f) {
+    return f.vcodec && f.vcodec !== "none" && f.vcodec !== "null";
+  }
+
+  /* ── Best format select karo ── */
+  function pickBest(formats) {
     if (!formats || !formats.length) return null;
+
     const valid = formats.filter(f => f.url && f.url.startsWith("http"));
-    const avMp4 = valid.find(f =>
-      f.vcodec && f.vcodec !== "none" &&
-      f.acodec && f.acodec !== "none" &&
-      f.ext === "mp4"
-    );
-    if (avMp4) return avMp4;
-    const avAny = valid.find(f =>
-      f.vcodec && f.vcodec !== "none" &&
-      f.acodec && f.acodec !== "none"
-    );
-    if (avAny) return avAny;
-    const videoOnly = valid.filter(f => f.vcodec && f.vcodec !== "none");
-    if (videoOnly.length) {
-      return videoOnly.sort((a, b) => (b.filesize||0) - (a.filesize||0))[0];
+    if (!valid.length) return null;
+
+    /* Priority 1: Video + Audio dono hain, mp4 */
+    const avMp4 = valid.find(f => hasVideo(f) && hasAudio(f) && f.ext === "mp4");
+    if (avMp4) {
+      console.log(`[format] Selected: av+mp4 | vcodec:${avMp4.vcodec} acodec:${avMp4.acodec}`);
+      return avMp4;
     }
+
+    /* Priority 2: Video + Audio dono hain, any format */
+    const avAny = valid.find(f => hasVideo(f) && hasAudio(f));
+    if (avAny) {
+      console.log(`[format] Selected: av+any | vcodec:${avAny.vcodec} acodec:${avAny.acodec}`);
+      return avAny;
+    }
+
+    /* Priority 3: Sabse zyada filesize wala (usually merged) */
+    const bySize = [...valid]
+      .filter(f => hasVideo(f))
+      .sort((a, b) => (b.filesize || b.filesize_approx || 0) - (a.filesize || a.filesize_approx || 0));
+
+    if (bySize.length) {
+      console.log(`[format] Selected: by-size | vcodec:${bySize[0].vcodec} acodec:${bySize[0].acodec}`);
+      return bySize[0];
+    }
+
+    /* Last resort: koi bhi valid */
+    console.log(`[format] Selected: fallback | any valid`);
     return valid[valid.length - 1];
   }
 
+  let directUrl = null;
+  let headers   = {};
+  let audioOk   = false;
+
+  /* ── Case 1: Direct URL on output itself ── */
   if (output.url && output.url.startsWith("http")) {
-    directUrl = output.url;
-    headers   = { ...(output.http_headers || {}) };
+    const f = output;
+    if (hasAudio(f) || !hasVideo(f)) {
+      /* Audio hai ya audio-only - use karo */
+      directUrl = f.url;
+      headers   = { ...(f.http_headers || {}) };
+      audioOk   = hasAudio(f);
+      console.log(`[format] Direct URL | acodec:${f.acodec} vcodec:${f.vcodec}`);
+    }
   }
+
+  /* ── Case 2: requested_formats (merged streams) ── */
   if (!directUrl && output.requested_formats?.length) {
-    const merged = output.requested_formats.find(f =>
-      f.url && f.vcodec && f.vcodec !== "none" &&
-      f.acodec && f.acodec !== "none"
-    );
+    const rf = output.requested_formats;
+
+    /* Merged format dhundho - jo video+audio dono ho */
+    const merged = rf.find(f => hasVideo(f) && hasAudio(f) && f.url?.startsWith("http"));
     if (merged) {
       directUrl = merged.url;
       headers   = { ...(merged.http_headers || {}) };
+      audioOk   = true;
+      console.log(`[format] requested_formats merged | acodec:${merged.acodec}`);
     } else {
-      const vf = output.requested_formats.find(f =>
-        f.url && f.vcodec && f.vcodec !== "none"
-      );
-      if (vf) { directUrl = vf.url; headers = { ...(vf.http_headers || {}) }; }
+      /*
+        Alag video aur audio streams hain - ffmpeg chahiye merge ke liye
+        Agar ffmpeg nahi hai to sirf video wala lo jo audio bhi have karta ho
+        Ya phir formats[] se try karo
+      */
+      const videoWithAudio = rf.find(f => hasVideo(f) && hasAudio(f));
+      const anyWithAudio   = rf.find(f => hasAudio(f));
+
+      if (videoWithAudio) {
+        directUrl = videoWithAudio.url;
+        headers   = { ...(videoWithAudio.http_headers || {}) };
+        audioOk   = true;
+        console.log(`[format] rf video+audio | acodec:${videoWithAudio.acodec}`);
+      } else if (anyWithAudio) {
+        directUrl = anyWithAudio.url;
+        headers   = { ...(anyWithAudio.http_headers || {}) };
+        audioOk   = true;
+        console.log(`[format] rf audio-only | acodec:${anyWithAudio.acodec}`);
+      }
     }
   }
+
+  /* ── Case 3: formats[] array ── */
   if (!directUrl && output.formats?.length) {
-    const best = selectBestFormat(output.formats);
-    if (best) { directUrl = best.url; headers = { ...(best.http_headers || {}) }; }
+    const best = pickBest(output.formats);
+    if (best) {
+      directUrl = best.url;
+      headers   = { ...(best.http_headers || {}) };
+      audioOk   = hasAudio(best);
+    }
+  }
+
+  /* ── Fallback: direct URL even if no audio info ── */
+  if (!directUrl && output.url?.startsWith("http")) {
+    directUrl = output.url;
+    headers   = { ...(output.http_headers || {}) };
+    console.log(`[format] Fallback to direct URL`);
   }
 
   if (!directUrl) return null;
+
+  /* Host headers hata do */
   delete headers["Host"];
   delete headers["host"];
 
+  console.log(`[format] Final: audioOk=${audioOk} | ${directUrl.slice(0,80)}`);
+
   return {
-    url:      directUrl,
-    title:    output.title || output.id || "Video",
+    url:       directUrl,
+    title:     output.title || output.id || "Video",
     thumbnail: output.thumbnail || null,
     headers,
-    hasAudio: output.acodec !== "none",
-    ext:      output.ext || "mp4"
+    audioOk
   };
 }
 
 /* ════════════════════════════════════════
+   FORMAT STRINGS - Audio Guaranteed
+   
+   Key insight:
+   - "best" = yt-dlp best single file (may have audio)
+   - "b" = same as best
+   - Specific format IDs with audio
+   - AVOID "bestvideo+bestaudio" without ffmpeg
+════════════════════════════════════════ */
+
+/* Instagram format strategies */
+const INSTAGRAM_STRATEGIES = [
+  {
+    name: "best_single",
+    args: [
+      /* 'best' = single file with video+audio */
+      "-f", "b",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "--add-header", "Accept-Language:en-US,en;q=0.9",
+      "--add-header", "Referer:https://www.instagram.com/",
+    ]
+  },
+  {
+    name: "best_explicit",
+    args: [
+      "-f", "best",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "--add-header", "Referer:https://www.instagram.com/",
+    ]
+  },
+  {
+    name: "mp4_with_audio",
+    args: [
+      /* mp4 jo audio bhi have kare */
+      "-f", "mp4[acodec!=none]/mp4/best[acodec!=none]/best",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+  },
+  {
+    name: "android_app",
+    args: [
+      "-f", "best",
+      "--add-header", "User-Agent:Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)",
+    ]
+  },
+  {
+    name: "no_format",
+    args: [
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    ]
+  }
+];
+
+/* Facebook format strategies */
+const FACEBOOK_STRATEGIES = [
+  {
+    name: "best_single",
+    args: [
+      "-f", "b",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+  },
+  {
+    name: "best_with_audio",
+    args: [
+      "-f", "best[acodec!=none]/best",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+  },
+  {
+    name: "mobile",
+    args: [
+      "-f", "best",
+      "--add-header", "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    ]
+  },
+  {
+    name: "no_format",
+    args: [
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    ]
+  }
+];
+
+/* Twitter/X format strategies */
+const TWITTER_STRATEGIES = [
+  {
+    name: "best_mp4_audio",
+    args: [
+      "-f", "best[ext=mp4][acodec!=none]/best[ext=mp4]/best[acodec!=none]/best",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+  },
+  {
+    name: "best_single",
+    args: [
+      "-f", "b",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    ]
+  },
+  {
+    name: "no_format",
+    args: [
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    ]
+  }
+];
+
+/* ════════════════════════════════════════
    EXTRACTORS
 ════════════════════════════════════════ */
-async function extractInstagram(url) {
-  const strategies = [
-    {
-      name: "bestaudio_chrome",
-      args: [
-        "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--add-header", "Accept-Language:en-US,en;q=0.9",
-        "--add-header", "Referer:https://www.instagram.com/",
-      ]
-    },
-    {
-      name: "best_simple",
-      args: [
-        "-f", "best[ext=mp4]/best",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--add-header", "Referer:https://www.instagram.com/",
-      ]
-    },
-    {
-      name: "android",
-      args: [
-        "-f", "best",
-        "--add-header", "User-Agent:Instagram 219.0.0.12.117 Android",
-      ]
-    },
-    { name: "default", args: ["-f", "best"] }
-  ];
+async function tryStrategies(url, strategies, platformName) {
+  let lastError = null;
 
   for (const s of strategies) {
     try {
-      console.log(`[instagram] Trying: ${s.name}`);
+      console.log(`[${platformName}] Trying: ${s.name}`);
       const out = await runYtdlp(url, s.args, 60000);
       const res = parseYtdlpOutput(out);
-      if (res?.url) { console.log(`[instagram] ✓ ${s.name}`); return res; }
+
+      if (!res?.url) {
+        console.log(`[${platformName}] ✗ ${s.name}: no URL`);
+        continue;
+      }
+
+      console.log(`[${platformName}] ✓ ${s.name} | audioOk:${res.audioOk} | ${res.url.slice(0,60)}`);
+
+      /* Audio hai to seedha return karo */
+      if (res.audioOk) return res;
+
+      /* Audio nahi hai lekin URL mila - agle strategy try karo pehle */
+      console.log(`[${platformName}] Audio missing, trying next strategy...`);
+      lastError = res; /* Fallback ke liye save karo */
+
     } catch(e) {
-      console.log(`[instagram] ✗ ${s.name}:`, e.message.slice(0,80));
+      console.log(`[${platformName}] ✗ ${s.name}: ${e.message.slice(0,80)}`);
+      lastError = e;
     }
   }
+
+  /* Koi audio wala nahi mila - jo bhi mila wo return karo */
+  if (lastError && !(lastError instanceof Error)) {
+    console.log(`[${platformName}] Returning best available (may lack audio)`);
+    return lastError;
+  }
+
+  return null;
+}
+
+async function extractInstagram(url) {
+  const result = await tryStrategies(url, INSTAGRAM_STRATEGIES, "instagram");
+  if (result) return result;
   throw new Error("Instagram video could not be extracted. It may be private or deleted.");
 }
 
 async function extractFacebook(url) {
-  const strategies = [
-    {
-      name: "bestaudio_chrome",
-      args: [
-        "-f", "bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      ]
-    },
-    {
-      name: "best_mp4",
-      args: [
-        "-f", "best[ext=mp4]/best",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      ]
-    },
-    {
-      name: "mobile",
-      args: [
-        "-f", "best",
-        "--add-header", "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
-      ]
-    },
-    { name: "default", args: ["-f", "best"] }
-  ];
-
-  for (const s of strategies) {
-    try {
-      console.log(`[facebook] Trying: ${s.name}`);
-      const out = await runYtdlp(url, s.args, 60000);
-      const res = parseYtdlpOutput(out);
-      if (res?.url) { console.log(`[facebook] ✓ ${s.name}`); return res; }
-    } catch(e) {
-      console.log(`[facebook] ✗ ${s.name}:`, e.message.slice(0,80));
-    }
-  }
+  const result = await tryStrategies(url, FACEBOOK_STRATEGIES, "facebook");
+  if (result) return result;
   throw new Error("Facebook video could not be extracted. It may be private.");
 }
 
 async function extractTwitter(url) {
-  const strategies = [
-    {
-      name: "bestaudio_mp4",
-      args: [
-        "-f", "bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      ]
-    },
-    {
-      name: "best_mp4",
-      args: [
-        "-f", "best[ext=mp4]/best",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      ]
-    },
-    { name: "default", args: ["-f", "best[ext=mp4]/best"] }
-  ];
-
-  for (const s of strategies) {
-    try {
-      console.log(`[twitter] Trying: ${s.name}`);
-      const out = await runYtdlp(url, s.args, 60000);
-      const res = parseYtdlpOutput(out);
-      if (res?.url) { console.log(`[twitter] ✓ ${s.name}`); return res; }
-    } catch(e) {
-      console.log(`[twitter] ✗ ${s.name}:`, e.message.slice(0,80));
-    }
-  }
+  const result = await tryStrategies(url, TWITTER_STRATEGIES, "twitter");
+  if (result) return result;
   throw new Error("Twitter/X video could not be extracted.");
 }
 
@@ -519,23 +655,15 @@ async function extractDirectVideoUrl(pageUrl) {
 ════════════════════════════════════════ */
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-async function fetchSafe(initialUrl, options={}, redirectCount=0) {
-  if (redirectCount > MAX_REDIRECTS) throw new Error("Too many redirects.");
-  const url = await validateUrl(initialUrl);
-  const h = { "User-Agent": UA, "Accept": "*/*", ...(options.headers||{}) };
-  delete h["Host"]; delete h["host"];
-  const response = await fetch(url, { ...options, redirect: "manual", headers: h, signal: options.signal });
-  if ([301,302,303,307,308].includes(response.status)) {
-    const loc = response.headers.get("location");
-    if (!loc) throw new Error("Redirect location missing.");
-    return fetchSafe(new URL(loc, url).toString(), options, redirectCount + 1);
-  }
-  return response;
-}
-
 async function fetchCDN(targetUrl, headers, signal) {
-  const h = { "User-Agent": UA, "Accept": "*/*", "Accept-Encoding": "identity", ...headers };
-  delete h["Host"]; delete h["host"]; delete h["Range"]; delete h["range"];
+  const h = {
+    "User-Agent":      UA,
+    "Accept":          "*/*",
+    "Accept-Encoding": "identity",
+    ...headers
+  };
+  delete h["Host"]; delete h["host"];
+  delete h["Range"]; delete h["range"];
   return fetch(targetUrl, { method: "GET", headers: h, redirect: "follow", signal });
 }
 
@@ -545,7 +673,7 @@ async function fetchCDN(targetUrl, headers, signal) {
 async function streamToResponse(response, res, controller, startTime) {
   const contentLength = Number(response.headers.get("content-length")||0);
   if (contentLength && contentLength > MAX_BYTES)
-    throw Object.assign(new Error("File exceeds 100 MB limit."), { status: 413 });
+    throw Object.assign(new Error("File exceeds size limit."), { status: 413 });
   if (!response.body) throw new Error("Media stream unavailable.");
   if (contentLength) res.setHeader("Content-Length", String(contentLength));
 
@@ -558,7 +686,9 @@ async function streamToResponse(response, res, controller, startTime) {
       if (limitExceeded) return cb();
       total += chunk.length;
       if (total > MAX_BYTES) {
-        limitExceeded = true; controller.abort(); res.destroy();
+        limitExceeded = true;
+        controller.abort();
+        res.destroy();
         return cb(new Error("Size limit exceeded"));
       }
       if (!res.write(chunk)) res.once("drain", cb); else cb();
@@ -581,13 +711,12 @@ async function streamToResponse(response, res, controller, startTime) {
 /* ════════════════════════════════════════
    ROUTES
 ════════════════════════════════════════ */
-
-/* Health check */
 app.get("/health", (_req, res) => res.json({
   ok:      true,
   service: "QuickSave",
   version: "8.7",
   memory:  `${getMemoryMB().toFixed(1)}MB`,
+  ffmpeg:  FFMPEG_PATH || "not found",
   queue: {
     processing:    queue.processing,
     waiting:       queue.queue.length,
@@ -598,7 +727,6 @@ app.get("/health", (_req, res) => res.json({
   cookies: fs.existsSync(COOKIES_FILE)
 }));
 
-/* ── Version API - PWA auto update ke liye ── */
 app.get("/api/version", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({
@@ -608,7 +736,6 @@ app.get("/api/version", (_req, res) => {
   });
 });
 
-/* ── Queue Status ── */
 app.get("/api/queue", (_req, res) => {
   res.json({
     ok:         true,
@@ -619,9 +746,8 @@ app.get("/api/queue", (_req, res) => {
   });
 });
 
-/* ── Share Route - FIXED ── */
+/* ── Share Route ── */
 app.get("/share", (req, res) => {
-  /* Teeno params try karo */
   const rawText = (
     req.query.url   ||
     req.query.text  ||
@@ -629,7 +755,6 @@ app.get("/share", (req, res) => {
     ""
   ).trim();
 
-  /* URL extract karo */
   const finalUrl = extractUrlFromText(rawText);
 
   if (finalUrl) {
@@ -637,7 +762,6 @@ app.get("/share", (req, res) => {
     return res.redirect(302, `/?url=${encodeURIComponent(finalUrl)}`);
   }
 
-  /* Koi URL nahi mila */
   console.log(`[share] No URL found in: ${rawText.slice(0, 60)}`);
   return res.redirect(302, "/");
 });
@@ -687,9 +811,6 @@ app.post("/api/inspect", async (req, res) => {
       message: "Server memory is high. Please try again in a moment."
     });
 
-  const queuePos = queue.queue.length + 1;
-  if (queuePos > 1) console.log(`[inspect] Queue position: ${queuePos}`);
-
   try {
     const result = await queue.add(async () => {
       console.log(`[inspect] Processing: ${targetUrlStr.slice(0,60)}`);
@@ -701,12 +822,18 @@ app.post("/api/inspect", async (req, res) => {
       const timer      = setTimeout(() => controller.abort(), INSPECT_TIMEOUT);
 
       try {
+        /* HEAD request se size check */
         let response = null;
         try {
-          const h = { "User-Agent": UA, "Accept": "*/*", ...(c.headers||{}) };
-          delete h["Host"]; delete h["host"]; delete h["Range"]; delete h["range"];
+          const h = {
+            "User-Agent": UA, "Accept": "*/*",
+            ...(c.headers||{})
+          };
+          delete h["Host"]; delete h["host"];
+          delete h["Range"]; delete h["range"];
           response = await fetch(c.url, {
-            method: "HEAD", headers: h, redirect: "follow", signal: controller.signal
+            method: "HEAD", headers: h,
+            redirect: "follow", signal: controller.signal
           });
         } catch { response = null; }
 
@@ -727,10 +854,10 @@ app.post("/api/inspect", async (req, res) => {
         if (!isValidMediaType(contentType))
           throw new Error("This URL does not contain a valid media file.");
         if (contentLength && contentLength > MAX_BYTES)
-          throw new Error("File is larger than 100 MB.");
+          throw new Error("File is larger than the size limit.");
 
         const filename = filenameFromUrl(c.url, contentType, c.title);
-        console.log(`[inspect] ✓ ${filename} | ${contentType} | ${contentLength}`);
+        console.log(`[inspect] ✓ ${filename} | ${contentType} | ${contentLength} | audio:${c.audioOk}`);
 
         return {
           ok: true, type: "media", id: c.downloadId,
@@ -812,8 +939,8 @@ app.get("/api/download", async (req, res) => {
       }
 
       if (extractionCache.has(rawUrl)) {
-        const c       = extractionCache.get(rawUrl);
-        targetUrl     = c.url;
+        const c        = extractionCache.get(rawUrl);
+        targetUrl      = c.url;
         extractedTitle = c.title;
         customHeaders  = c.headers || {};
         originalUrl    = c.originalUrl;
@@ -821,10 +948,10 @@ app.get("/api/download", async (req, res) => {
         const validated = await validateUrl(rawUrl);
         targetUrl = validated.toString();
         if (isSupportedUrl(targetUrl)) {
-          originalUrl = targetUrl;
-          const data  = await queue.add(() => extractDirectVideoUrl(targetUrl));
-          const c     = cacheExtraction(targetUrl, data);
-          targetUrl     = c.url;
+          originalUrl    = targetUrl;
+          const data     = await queue.add(() => extractDirectVideoUrl(targetUrl));
+          const c        = cacheExtraction(targetUrl, data);
+          targetUrl      = c.url;
           extractedTitle = c.title;
           customHeaders  = c.headers || {};
         }
@@ -843,16 +970,18 @@ app.get("/api/download", async (req, res) => {
       let contentType = getRawContentType(response);
       if (contentType === "application/octet-stream") contentType = "video/mp4";
 
+      /* Response sahi nahi hai - re-extract karo */
       if (!response.ok || !isValidMediaType(contentType)) {
         if (originalUrl && isSupportedUrl(originalUrl)) {
           try {
-            const fresh = await queue.add(() => extractDirectVideoUrl(originalUrl));
-            const c     = cacheExtraction(originalUrl, fresh);
-            targetUrl     = c.url;
+            console.log(`[dl] Re-extracting: ${originalUrl.slice(0,60)}`);
+            const fresh    = await queue.add(() => extractDirectVideoUrl(originalUrl));
+            const c        = cacheExtraction(originalUrl, fresh);
+            targetUrl      = c.url;
             customHeaders  = c.headers || {};
             extractedTitle = fresh.title;
-            response    = await fetchCDN(targetUrl, customHeaders, controller.signal);
-            contentType = getRawContentType(response);
+            response       = await fetchCDN(targetUrl, customHeaders, controller.signal);
+            contentType    = getRawContentType(response);
             if (contentType === "application/octet-stream") contentType = "video/mp4";
           } catch {
             return res.status(502).json({
@@ -893,7 +1022,9 @@ app.get("/api/download", async (req, res) => {
     if (!res.headersSent)
       res.status(e.status || 400).json({
         ok: false,
-        message: e.name === "AbortError" ? "Download timed out." : e.message || "Download failed."
+        message: e.name === "AbortError"
+          ? "Download timed out."
+          : e.message || "Download failed."
       });
     else res.destroy();
   }
