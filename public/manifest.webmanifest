@@ -13,8 +13,8 @@
     "method": "GET",
     "params": {
       "title": "title",
-      "text": "text",
-      "url": "url"
+      "text":  "text",
+      "url":   "url"
     }
   },
   "icons": [
@@ -33,16 +33,7 @@
     {
       "src": "/icon.svg",
       "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
-    }
-  ],
-  "screenshots": [
-    {
-      "src": "/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "form_factor": "narrow"
+      "type": "image/svg+xml"
     }
   ],
   "categories": ["utilities", "productivity"],
