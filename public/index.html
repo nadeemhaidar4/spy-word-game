@@ -20,8 +20,6 @@
   <link rel="apple-touch-icon" href="/icon-192.png">
   <title>QuickSave — Free Instagram Facebook Twitter Video Downloader</title>
   <link rel="stylesheet" href="/styles.css">
-
-  <!-- Monetag: sirf tab load ho jab ads enabled ho -->
   <script>
     (function() {
       if (localStorage.getItem("qs_ads_disabled") !== "true") {
@@ -43,7 +41,6 @@
   <button id="updateNowBtn" class="update-btn">Update Now</button>
 </div>
 
-<!-- Background Orbs -->
 <div class="orb o1"></div>
 <div class="orb o2"></div>
 
@@ -53,13 +50,13 @@
     <div class="ios-install-icon">↧</div>
     <div class="ios-install-text">
       <strong>Install QuickSave</strong>
-      <span>Tap <b>Share</b> ⎋ then <b>"Add to Home Screen"</b></span>
+      <span>Tap <b>Share</b> then <b>"Add to Home Screen"</b></span>
     </div>
     <button id="iosDismiss" class="ios-dismiss">✕</button>
   </div>
 </div>
 
-<!-- Interstitial Ad - PWA ke liye -->
+<!-- Interstitial Ad -->
 <div id="interstitialAd" class="interstitial-overlay hide">
   <div class="interstitial-box">
     <div class="interstitial-header">
@@ -69,16 +66,12 @@
       </button>
     </div>
     <div class="interstitial-content">
-      <p style="color:#555;font-size:13px;text-align:center;">
-        Advertisement Loading…
-      </p>
+      <p style="color:#555;font-size:13px;text-align:center;">Advertisement Loading...</p>
     </div>
   </div>
 </div>
 
 <main>
-
-  <!-- ── Navigation ── -->
   <nav>
     <a class="brand" href="/">
       <div class="brand-icon">↧</div>
@@ -88,7 +81,7 @@
       </div>
     </a>
     <div class="navright">
-      <button id="install" class="install hidden">⬇ Install App</button>
+      <button id="install" class="install hidden">⬇ Install</button>
       <label class="autolabel" title="Auto-detect clipboard links">
         <input type="checkbox" id="autoToggle">
         <span class="slider"></span>
@@ -97,35 +90,34 @@
     </div>
   </nav>
 
-  <!-- ── Hero Section ── -->
   <section class="hero">
     <div class="tag">● INSTAGRAM &nbsp;•&nbsp; FACEBOOK &nbsp;•&nbsp; TWITTER/X</div>
     <h1>Save any video.<br><i>In seconds.</i></h1>
-    <p>Download Instagram Reels, Facebook videos, and Twitter clips for free. No signup. No watermark. Background download supported.</p>
+    <p>Download Instagram Reels, Facebook videos, and Twitter clips for free. No signup. No watermark.</p>
 
     <!-- Queue Status -->
     <div id="queueStatus" class="queue-status hide">
       <div class="queue-dot"></div>
-      <span id="queueText">Server processing requests…</span>
+      <span id="queueText">Processing...</span>
     </div>
 
-    <!-- Background Download Status -->
+    <!-- Background Status -->
     <div id="bgStatus" class="bg-status hide">
-      <div id="bgStatusIcon" class="bg-icon">⬇</div>
+      <div id="bgStatusIcon" class="bg-icon">⏳</div>
       <div class="bg-content">
         <strong>Background Download</strong>
-        <span id="bgStatusText">Processing…</span>
+        <span id="bgStatusText">Processing...</span>
       </div>
     </div>
 
-    <!-- ── Main Input Box ── -->
+    <!-- Input Box -->
     <div id="drop" class="box">
       <div class="droptext">🔗 Drop or paste a video link here</div>
       <div class="input">
         <span>⌁</span>
         <input
           id="url"
-          placeholder="Paste Instagram, Facebook, Twitter link…"
+          placeholder="Paste Instagram, Facebook, or Twitter link..."
           autocomplete="off"
           autocorrect="off"
           autocapitalize="off"
@@ -137,13 +129,13 @@
       <button id="go" class="go" type="button">
         Get media <strong>→</strong>
       </button>
-      <div class="hint">✓ Free &nbsp;•&nbsp; No Signup &nbsp;•&nbsp; No Watermark &nbsp;•&nbsp; Background Download</div>
+      <div class="hint">✓ Free &nbsp;•&nbsp; No Signup &nbsp;•&nbsp; No Watermark</div>
     </div>
 
-    <!-- Status Message -->
+    <!-- Status -->
     <div id="status" class="status hide"></div>
 
-    <!-- ── Result Card ── -->
+    <!-- Result Card -->
     <section id="result" class="result hide">
       <div class="preview">
         <div class="thumb" id="thumb" title="Click to preview"><span>▶</span></div>
@@ -153,17 +145,13 @@
           <em id="meta">Video</em>
         </div>
       </div>
-
-      <!-- Progress Bar -->
       <div class="progress hide" id="progress">
         <div>
-          <span id="progressText">Preparing…</span>
+          <span id="progressText">Preparing...</span>
           <span id="progressPct">0%</span>
         </div>
         <i><b id="bar"></b></i>
       </div>
-
-      <!-- Download Button -->
       <a id="download" class="download" href="#">
         ⬇ Download Video Free
       </a>
@@ -178,103 +166,79 @@
       <div class="ad-banner"></div>
     </div>
 
-    <!-- ── Recent Downloads ── -->
-    <section id="historyPanel" class="history hide">
-      <div class="sectionhead">
-        <h2>Recent downloads</h2>
-        <button id="clearHistory" type="button">Clear</button>
-      </div>
-      <div id="history"></div>
-    </section>
-
-    <!-- ── How To ── -->
+    <!-- How To -->
     <section class="howto">
-      <h2>How to Download Videos — Even in Background!</h2>
+      <h2>How to Download Videos</h2>
       <div class="steps">
         <div class="step">
           <div class="step-num">1</div>
           <div class="step-text">
-            <strong>Share from Instagram / Facebook / Twitter</strong>
-            <span>Video ke neeche Share button tap karo → QuickSave select karo</span>
+            <strong>Copy the link</strong>
+            <span>Open Instagram, Facebook, or Twitter. Tap Share → Copy Link.</span>
           </div>
         </div>
         <div class="step">
           <div class="step-num">2</div>
           <div class="step-text">
-            <strong>App background mein process karti hai</strong>
-            <span>Aap turant wapas Instagram ya Facebook use kar sakte hain — QuickSave background mein kaam karti rahegi</span>
+            <strong>Paste and get media</strong>
+            <span>Paste the link above and tap "Get media" button.</span>
           </div>
         </div>
         <div class="step">
           <div class="step-num">3</div>
           <div class="step-text">
-            <strong>Notification tap karo → Auto save!</strong>
-            <span>Jab video ready hogi, notification aayegi. Tap karo — video automatically Downloads folder mein save ho jayegi!</span>
+            <strong>Download instantly</strong>
+            <span>Tap "Download Video Free" — file saves directly to your Downloads folder.</span>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ── Features ── -->
+    <!-- Features -->
     <div class="features">
       <article>
         <b>📸</b>
         <strong>Instagram Downloader</strong>
-        <span>Download Reels, posts, and IGTV videos in HD quality. Background download supported!</span>
+        <span>Download Reels, posts, and IGTV videos in HD quality instantly.</span>
       </article>
       <article>
         <b>👥</b>
         <strong>Facebook Downloader</strong>
-        <span>Save public Facebook videos in high quality. Share karo aur wapas scroll karo!</span>
+        <span>Save public Facebook videos in high quality with one click.</span>
       </article>
       <article>
         <b>🐦</b>
         <strong>Twitter / X Downloader</strong>
-        <span>Download Twitter videos and GIFs directly. Fast, free, no watermark.</span>
-      </article>
-      <article>
-        <b>⬇</b>
-        <strong>Background Download</strong>
-        <span>Share karke wapas app pe jao. QuickSave background mein download karta hai aur notify karta hai!</span>
+        <span>Download Twitter videos and GIFs directly to your device.</span>
       </article>
     </div>
 
-    <!-- ── FAQ ── -->
+    <!-- FAQ -->
     <section class="faq">
       <h2>Frequently Asked Questions</h2>
-
       <details>
         <summary>Is QuickSave completely free?</summary>
-        <p>Yes! QuickSave is 100% free. No hidden charges, no subscription, no signup required ever.</p>
+        <p>Yes! QuickSave is 100% free. No hidden charges, no subscription, no signup required.</p>
       </details>
-
-      <details>
-        <summary>Background download kaise kaam karta hai?</summary>
-        <p>Instagram/Facebook mein Share button tap karo, list mein QuickSave select karo. App automatically background mein process shuru kar degi. Aap turant wapas ja sakte hain. Jab download ready ho, notification aayegi — tap karo aur video apne aap Downloads mein save ho jayegi!</p>
-      </details>
-
       <details>
         <summary>Can I download Instagram Reels without watermark?</summary>
-        <p>Yes! All videos downloaded via QuickSave are completely watermark-free in original quality.</p>
+        <p>Yes! All videos are watermark-free in original quality.</p>
       </details>
-
+      <details>
+        <summary>How do I download Facebook videos?</summary>
+        <p>Copy the Facebook video URL, paste it above, and click "Get media". Done!</p>
+      </details>
       <details>
         <summary>Does it work on iPhone and Android?</summary>
-        <p>Yes! Works on all devices. For best background download experience, install the QuickSave PWA from your browser (Add to Home Screen).</p>
+        <p>Yes! Works on all devices — iPhone, Android, and desktop browsers.</p>
       </details>
-
-      <details>
-        <summary>Notification allow karna zaruri hai?</summary>
-        <p>Background download ke liye haan — notification se pata chalta hai jab video ready ho. Bina notification ke aap app mein wapas aakar manually download kar sakte hain.</p>
-      </details>
-
       <details>
         <summary>Are my downloads private?</summary>
-        <p>Yes. We don't store any URLs or videos on our servers. Everything is processed temporarily and deleted immediately after download.</p>
+        <p>Yes. We do not store any URLs or videos. Everything is deleted immediately after download.</p>
       </details>
     </section>
 
-    <!-- ── Ad Code Section ── -->
+    <!-- Ad Code -->
     <div class="ad-code-section">
       <h3>🔑 Have a special code?</h3>
       <div class="code-input-row">
@@ -291,15 +255,12 @@
       <div id="adCodeMsg" class="code-msg"></div>
     </div>
 
-    <!-- Notice -->
     <div class="notice">
-      <b>⚠ Use responsibly.</b> Only download media you own or have explicit permission to save.
-      Respect creators' rights and platform terms of service.
+      <b>⚠ Use responsibly.</b> Only download media you own or have permission to save.
     </div>
 
-  </section><!-- /.hero -->
+  </section>
 
-  <!-- ── Footer ── -->
   <footer>
     <span>© 2026 QuickSave — Free Video Downloader</span>
     <div class="footer-links">
@@ -307,7 +268,6 @@
       <a href="/terms.html">Terms of Use</a>
     </div>
   </footer>
-
 </main>
 
 <script src="/app.js"></script>
