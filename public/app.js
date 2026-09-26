@@ -1,5 +1,5 @@
-/* QuickSave app.js v8.4 */
-console.log("QuickSave v8.4 loaded");
+/* QuickSave app.js v8.5 */
+console.log("QuickSave v8.5 loaded");
 
 const AD_DISABLE_CODE = "666666";
 const $ = id => document.getElementById(id);
@@ -10,16 +10,14 @@ const url            = $("url"),
       drop           = $("drop"),
       status         = $("status"),
       result         = $("result"),
-      name           = $("name"),
+      mediaName      = $("name"),
       meta           = $("meta"),
-      download       = $("download"),
+      downloadBtn    = $("download"),
       thumb          = $("thumb"),
       progress       = $("progress"),
       bar            = $("bar"),
       progressText   = $("progressText"),
       progressPct    = $("progressPct"),
-      historyPanel   = $("historyPanel"),
-      historyEl      = $("history"),
       install        = $("install"),
       iosInstall     = $("iosInstall"),
       iosDismiss     = $("iosDismiss"),
@@ -46,9 +44,6 @@ let autoProc      = false;
 let lastUrl       = "";
 let swReg         = null;
 let newSW         = null;
-
-/* Pending file data - SW se aaya buffer */
-let pendingFile = null;
 
 /* ════════════════════════════════════════
    UTILS
@@ -92,47 +87,107 @@ function msg(t, c="") {
 }
 
 /* ════════════════════════════════════════
-   AD MANAGEMENT
+   SMART FILENAME - Auto rename if exists
+   video.mp4 → video_1.mp4 → video_2.mp4
 ════════════════════════════════════════ */
-function isAdsOff() { return localStorage.getItem("qs_ads_disabled") === "true"; }
-function setAdsOff(v) {
-  localStorage.setItem("qs_ads_disabled", v ? "true" : "false");
-  applyAds();
-}
-function applyAds() {
-  const off = isAdsOff();
-  document.querySelectorAll(".ad-wrap,.interstitial-overlay,[data-ad]")
-    .forEach(el => el.classList.toggle("ads-hidden", off));
-  if (adCodeMsg) {
-    adCodeMsg.textContent = off ? "✅ Ads disabled" : "";
-    adCodeMsg.className   = off ? "code-msg ok" : "code-msg";
+function getSmartFilename(filename) {
+  /* localStorage mein track karo */
+  const key       = "qs_dl_names";
+  const usedNames = JSON.parse(localStorage.getItem(key) || "{}");
+
+  /* Clean old entries (24 hours se purane) */
+  const now = Date.now();
+  Object.keys(usedNames).forEach(k => {
+    if (now - usedNames[k] > 24 * 60 * 60 * 1000) delete usedNames[k];
+  });
+
+  const ext  = filename.match(/\.[a-z0-9]+$/i)?.[0] || ".mp4";
+  const base = filename.replace(/\.[a-z0-9]+$/i, "");
+
+  let finalName = filename;
+  let counter   = 0;
+
+  /* Already exist karta hai? Counter badhao */
+  while (usedNames[finalName]) {
+    counter++;
+    finalName = `${base}_${counter}${ext}`;
   }
+
+  /* Mark as used */
+  usedNames[finalName] = now;
+  localStorage.setItem(key, JSON.stringify(usedNames));
+
+  return finalName;
 }
-adCodeBtn?.addEventListener("click", () => {
-  const c = (adCodeInput?.value || "").trim();
-  if (c === AD_DISABLE_CODE) {
-    setAdsOff(true);
-    if (adCodeMsg) { adCodeMsg.textContent="✅ Ads disabled!"; adCodeMsg.className="code-msg ok"; }
-  } else if (c === "000000") {
-    setAdsOff(false);
-    if (adCodeMsg) { adCodeMsg.textContent="Ads enabled."; adCodeMsg.className="code-msg"; }
-  } else {
-    if (adCodeMsg) { adCodeMsg.textContent="❌ Invalid code."; adCodeMsg.className="code-msg err"; }
-  }
-  if (adCodeInput) adCodeInput.value = "";
-});
-adCodeInput?.addEventListener("keydown", e => { if (e.key==="Enter") adCodeBtn?.click(); });
 
 /* ════════════════════════════════════════
-   AUTO TOGGLE
+   SAVE FILE TO DEVICE
+   Blob URL use karo - NO Chrome download
+   manager notification
 ════════════════════════════════════════ */
-function isAutoOn() { return localStorage.getItem("qs_auto") !== "false"; }
-function setAuto(v) {
-  localStorage.setItem("qs_auto", v ? "true" : "false");
-  autoToggle.checked    = v;
-  autoLabel.textContent = v ? "Auto ON" : "Auto OFF";
+async function saveFileToDevice(buffer, filename, contentType) {
+  if (!buffer || buffer.byteLength < 1000) {
+    throw new Error("Invalid file data");
+  }
+
+  /* Smart filename - no duplicate */
+  const smartName = getSmartFilename(filename);
+  const mimeType  = contentType?.startsWith("video/") ? contentType
+    : contentType?.startsWith("audio/") ? contentType
+    : "video/mp4";
+
+  const blob    = new Blob([buffer], { type: mimeType });
+  const blobUrl = URL.createObjectURL(blob);
+
+  console.log("[save]", smartName, (blob.size/1024/1024).toFixed(2)+"MB", mimeType);
+
+  try {
+    const a         = document.createElement("a");
+    a.href          = blobUrl;
+    a.download      = smartName;
+    a.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
+
+    document.body.appendChild(a);
+    a.click();
+
+    /* Cleanup after browser picks it up */
+    await new Promise(r => setTimeout(r, 3000));
+    try { document.body.removeChild(a); } catch {}
+    URL.revokeObjectURL(blobUrl);
+
+  } catch(e) {
+    URL.revokeObjectURL(blobUrl);
+    throw e;
+  }
+
+  return smartName;
 }
-autoToggle.addEventListener("change", () => setAuto(autoToggle.checked));
+
+/* ════════════════════════════════════════
+   SHOW SAVE NOTIFICATION
+   Browser notification - sirf save hone par
+════════════════════════════════════════ */
+async function showSaveNotification(filename, sizeMB) {
+  if (!("Notification" in window)) return;
+  if (Notification.permission !== "granted") return;
+
+  try {
+    /* SW ke through notification - PWA icon use hoga */
+    if (swReg) {
+      await swReg.showNotification("✅ Video Saved!", {
+        body:    `${filename} (${sizeMB}MB) saved to Downloads`,
+        icon:    "/icon-192.png",
+        badge:   "/icon-192.png",
+        tag:     "qs-saved",       /* Same tag - replace old */
+        silent:  false,
+        vibrate: [200],
+        data:    { type: "saved" }
+      });
+    }
+  } catch(e) {
+    console.log("[notif] Failed:", e.message);
+  }
+}
 
 /* ════════════════════════════════════════
    BG STATUS UI
@@ -158,8 +213,8 @@ async function updateQ() {
     if (!queueStatus||!queueText) return;
     if (d.processing>0||d.waiting>0) {
       queueStatus.classList.remove("hide");
-      queueText.textContent = d.available
-        ? "Server ready" : `${d.processing} processing, ${d.waiting} waiting`;
+      queueText.textContent = d.available ? "Server ready"
+        : `${d.processing} processing, ${d.waiting} waiting`;
     } else {
       queueStatus.classList.add("hide");
     }
@@ -177,104 +232,15 @@ async function askNotif() {
 }
 
 /* ════════════════════════════════════════
-   SAVE FILE - Core Function
-   
-   Browser mein file save karna:
-   1. showSaveFilePicker (modern Chrome) - user chooses location
-   2. Blob URL + hidden link (fallback) - Downloads folder
-   
-   IMPORTANT: NO a.click() on normal anchor
-   Use createObjectURL with proper MIME
-════════════════════════════════════════ */
-const savedFiles = new Set();
-
-async function saveFileToDevice(buffer, filename, contentType) {
-  /* Duplicate guard */
-  const fileKey = filename + "_" + (buffer?.byteLength || 0);
-  if (savedFiles.has(fileKey)) {
-    console.log("[save] Already saved, skip:", filename);
-    return;
-  }
-  savedFiles.add(fileKey);
-  setTimeout(() => savedFiles.delete(fileKey), 60000);
-
-  console.log("[save] Saving:", filename, (buffer?.byteLength/1024/1024).toFixed(2)+"MB");
-
-  /* Validate buffer */
-  if (!buffer || buffer.byteLength < 1000) {
-    throw new Error("Invalid file data received");
-  }
-
-  const mimeType = contentType?.startsWith("video/") ? contentType : "video/mp4";
-  const blob     = new Blob([buffer], { type: mimeType });
-
-  console.log("[save] Blob:", blob.size, "bytes | type:", blob.type);
-
-  /* Method 1: File System Access API (Chrome 86+, no extra notification) */
-  if ("showSaveFilePicker" in window) {
-    try {
-      const ext = filename.match(/\.[a-z0-9]+$/i)?.[0] || ".mp4";
-      const handle = await window.showSaveFilePicker({
-        suggestedName: filename,
-        types: [{
-          description: "Video File",
-          accept: { [mimeType]: [ext] }
-        }]
-      });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      console.log("[save] ✓ File System API success");
-      return;
-    } catch(e) {
-      /* User cancelled - don't fallback silently */
-      if (e.name === "AbortError") {
-        console.log("[save] User cancelled save dialog");
-        throw new Error("Save cancelled by user");
-      }
-      console.log("[save] File System API failed:", e.message, "| Trying fallback...");
-    }
-  }
-
-  /* Method 2: Blob URL download (Downloads folder - no Chrome notification) */
-  const blobUrl = URL.createObjectURL(blob);
-
-  try {
-    const a      = document.createElement("a");
-    a.href       = blobUrl;
-    a.download   = filename; /* This triggers download, no navigation */
-    a.rel        = "noopener";
-
-    /* Must be in DOM for Firefox */
-    a.style.cssText = "position:fixed;top:-999px;left:-999px;";
-    document.body.appendChild(a);
-
-    /* Single click - no double trigger */
-    a.click();
-
-    setTimeout(() => {
-      try { document.body.removeChild(a); } catch {}
-      URL.revokeObjectURL(blobUrl);
-    }, 3000);
-
-    console.log("[save] ✓ Blob download triggered:", filename);
-  } catch(e) {
-    URL.revokeObjectURL(blobUrl);
-    throw e;
-  }
-}
-
-/* ════════════════════════════════════════
-   SW MESSAGE HANDLER
+   SW MESSAGES
 ════════════════════════════════════════ */
 function setupSWMessages() {
   if (!("serviceWorker" in navigator)) return;
 
   navigator.serviceWorker.addEventListener("message", async event => {
     const d = event.data || {};
-    console.log("[SW→App]", d.type, d.status || "");
 
-    /* Background status updates */
+    /* Background status */
     if (d.type === "BG_STATUS") {
       switch(d.status) {
         case "processing":
@@ -284,111 +250,48 @@ function setupSWMessages() {
           showBg(`Downloading ${d.filename || "video"}...`, "downloading", "⬇");
           break;
         case "error":
-          showBg(d.msg || "Download failed", "err", "❌");
-          hideBg(6000);
+          showBg(d.msg || "Download failed. Please try again.", "err", "❌");
+          hideBg(5000);
           break;
       }
       return;
     }
 
-    /* SW sent file buffer - save immediately */
+    /* File ready - SW sent buffer */
     if (d.type === "SAVE_FILE") {
-      console.log("[App] Got SAVE_FILE:", d.filename, d.sizeMB+"MB");
-
-      /* Store for notification click fallback */
-      pendingFile = {
-        buffer:      d.buffer,
-        filename:    d.filename,
-        contentType: d.contentType,
-        id:          d.id,
-        receivedAt:  Date.now()
-      };
-
+      console.log("[App] Got file:", d.filename);
       showBg(`Saving ${d.filename}...`, "downloading", "⬇");
 
       try {
-        await saveFileToDevice(d.buffer, d.filename, d.contentType);
-        showBg(`Video saved to Downloads!`, "ok", "✅");
-        msg("✅ Video saved successfully!", "ok");
+        const savedName = await saveFileToDevice(d.buffer, d.filename, d.contentType);
+        const sizeMB    = (d.buffer?.byteLength / 1024 / 1024).toFixed(1);
 
-        saveHistory({
-          id:   "bg_" + Date.now(),
-          name: d.filename,
-          type: d.contentType || "video/mp4",
-          time: Date.now()
-        });
+        showBg(`✅ "${savedName}" saved!`, "ok", "✅");
+        msg("✅ Video saved to Downloads!", "ok");
+
+        /* Notification - sirf save hone par */
+        await showSaveNotification(savedName, sizeMB);
 
         hideBg(8000);
+
       } catch(e) {
-        if (e.message !== "Save cancelled by user") {
-          showBg(`Save failed: ${e.message}`, "err", "❌");
-          hideBg(6000);
-        } else {
-          showBg("Save cancelled.", "err", "❌");
-          hideBg(3000);
-        }
+        console.error("[App] Save failed:", e.message);
+        showBg(`Save failed: ${e.message}`, "err", "❌");
+        hideBg(5000);
       }
-      return;
-    }
-
-    /* Notification was clicked - trigger download */
-    if (d.type === "NOTIF_CLICKED") {
-      console.log("[App] Notification clicked, mediaId:", d.mediaId);
-
-      /* Pending file available hai? */
-      if (pendingFile &&
-          Date.now() - pendingFile.receivedAt < 5 * 60 * 1000) {
-        showBg(`Saving ${pendingFile.filename}...`, "downloading", "⬇");
-        try {
-          await saveFileToDevice(
-            pendingFile.buffer,
-            pendingFile.filename,
-            pendingFile.contentType
-          );
-          showBg("Video saved to Downloads!", "ok", "✅");
-          msg("✅ Video saved!", "ok");
-          hideBg(8000);
-        } catch(e) {
-          /* Fallback to server download */
-          fallbackServerDownload(d.mediaId, d.filename);
-        }
-        return;
-      }
-
-      /* No pending file - server se download */
-      fallbackServerDownload(d.mediaId, d.filename);
       return;
     }
   });
 }
 
-/* ── Server se direct download (fallback) ── */
-function fallbackServerDownload(mediaId, filename) {
-  if (!mediaId) return;
-  console.log("[App] Fallback server download:", mediaId);
-  showBg(`Downloading ${filename}...`, "downloading", "⬇");
-
-  const a = document.createElement("a");
-  a.href  = `/api/download?id=${encodeURIComponent(mediaId)}`;
-  a.download = filename || "QuickSave_video.mp4";
-  a.style.cssText = "position:fixed;top:-999px;left:-999px;";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    try { document.body.removeChild(a); } catch {}
-    showBg("Check your Downloads folder.", "ok", "✅");
-    hideBg(5000);
-  }, 1000);
-}
-
 /* ════════════════════════════════════════
-   BACKGROUND DOWNLOAD START
+   BACKGROUND DOWNLOAD
 ════════════════════════════════════════ */
 async function startBgDownload(pageUrl) {
   if (!swReg?.active) return false;
 
-  const hasNotif = await askNotif();
-  if (!hasNotif) return false;
+  /* Notification permission - sirf save notification ke liye */
+  await askNotif();
 
   const dlId = `dl_${Date.now()}`;
   swReg.active.postMessage({
@@ -414,9 +317,51 @@ async function handleShare(sharedUrl) {
     const ok = await startBgDownload(sharedUrl);
     if (ok) return;
   }
-
   await processUrl(sharedUrl, true);
 }
+
+/* ════════════════════════════════════════
+   AD MANAGEMENT
+════════════════════════════════════════ */
+function isAdsOff() { return localStorage.getItem("qs_ads_disabled") === "true"; }
+function setAdsOff(v) {
+  localStorage.setItem("qs_ads_disabled", v ? "true" : "false");
+  applyAds();
+}
+function applyAds() {
+  const off = isAdsOff();
+  document.querySelectorAll(".ad-wrap,.interstitial-overlay,[data-ad]")
+    .forEach(el => el.classList.toggle("ads-hidden", off));
+  if (adCodeMsg) {
+    adCodeMsg.textContent = off ? "✅ Ads disabled" : "";
+    adCodeMsg.className   = off ? "code-msg ok" : "code-msg";
+  }
+}
+adCodeBtn?.addEventListener("click", () => {
+  const c = (adCodeInput?.value || "").trim();
+  if (c === AD_DISABLE_CODE) {
+    setAdsOff(true);
+    if (adCodeMsg) { adCodeMsg.textContent = "✅ Ads disabled!"; adCodeMsg.className = "code-msg ok"; }
+  } else if (c === "000000") {
+    setAdsOff(false);
+    if (adCodeMsg) { adCodeMsg.textContent = "Ads enabled."; adCodeMsg.className = "code-msg"; }
+  } else {
+    if (adCodeMsg) { adCodeMsg.textContent = "❌ Invalid code."; adCodeMsg.className = "code-msg err"; }
+  }
+  if (adCodeInput) adCodeInput.value = "";
+});
+adCodeInput?.addEventListener("keydown", e => { if (e.key==="Enter") adCodeBtn?.click(); });
+
+/* ════════════════════════════════════════
+   AUTO TOGGLE
+════════════════════════════════════════ */
+function isAutoOn() { return localStorage.getItem("qs_auto") !== "false"; }
+function setAuto(v) {
+  localStorage.setItem("qs_auto", v ? "true" : "false");
+  autoToggle.checked    = v;
+  autoLabel.textContent = v ? "Auto ON" : "Auto OFF";
+}
+autoToggle.addEventListener("change", () => setAuto(autoToggle.checked));
 
 /* ════════════════════════════════════════
    INTERSTITIAL AD
@@ -442,7 +387,7 @@ function showAd(cb) {
 }
 
 /* ════════════════════════════════════════
-   UPDATE
+   UPDATE BANNER
 ════════════════════════════════════════ */
 function showUpdateBanner() {
   updateBanner?.classList.remove("hide");
@@ -453,12 +398,12 @@ function showUpdateBanner() {
 }
 async function checkVersion() {
   try {
-    const d = await fetch("/api/version?t="+Date.now()).then(r=>r.json());
+    const d  = await fetch("/api/version?t=" + Date.now()).then(r => r.json());
     const sv = localStorage.getItem("qs_sv");
     if (sv && sv !== d.version) {
       localStorage.setItem("qs_sv", d.version);
       const keys = await caches.keys();
-      await Promise.all(keys.map(k=>caches.delete(k)));
+      await Promise.all(keys.map(k => caches.delete(k)));
       location.reload(true);
     } else {
       localStorage.setItem("qs_sv", d.version);
@@ -467,38 +412,7 @@ async function checkVersion() {
 }
 
 /* ════════════════════════════════════════
-   HISTORY
-════════════════════════════════════════ */
-function saveHistory(item) {
-  let h = JSON.parse(localStorage.getItem("qs_history")||"[]");
-  h = [item, ...h.filter(x=>x.id!==item.id)].slice(0,8);
-  localStorage.setItem("qs_history", JSON.stringify(h));
-  renderHistory();
-}
-function renderHistory() {
-  const h = JSON.parse(localStorage.getItem("qs_history")||"[]");
-  if (!h.length) { historyPanel.classList.add("hide"); return; }
-  historyPanel.classList.remove("hide");
-  historyEl.innerHTML = h.map(x => {
-    const isBg   = x.id?.startsWith("bg_") || x.id?.startsWith("local_");
-    const href   = isBg ? "#" : escH(`/api/download?id=${x.id}`);
-    const dlAttr = isBg ? "" : `download="${escH(x.name||"media")}"`;
-    return `<div class="historyrow">
-      <div>
-        <b>${escH(x.name||"media")}</b>
-        <small>${escH(x.type||"media")} • ${new Date(x.time).toLocaleString()}</small>
-      </div>
-      <a href="${href}" ${dlAttr}>${isBg?"✓ Saved":"↓ Save"}</a>
-    </div>`;
-  }).join("");
-}
-$("clearHistory").onclick = () => {
-  localStorage.removeItem("qs_history");
-  renderHistory();
-};
-
-/* ════════════════════════════════════════
-   CLIPBOARD AUTO PASTE
+   CLIPBOARD
 ════════════════════════════════════════ */
 async function tryAutoPaste() {
   if (!isAutoOn()) return null;
@@ -510,7 +424,7 @@ async function tryAutoPaste() {
 }
 
 /* ════════════════════════════════════════
-   MAIN PROCESS (Normal flow)
+   MAIN PROCESS
 ════════════════════════════════════════ */
 async function processUrl(value, autoDownload=false) {
   if (!value || autoProc) return;
@@ -527,7 +441,7 @@ async function processUrl(value, autoDownload=false) {
   progress.classList.add("hide");
   adAfterDl?.classList.add("hide");
 
-  const btnTxt = [...go.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
+  const btnTxt = [...go.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
   if (btnTxt) btnTxt.textContent = "Checking... ";
   updateQ();
 
@@ -535,27 +449,28 @@ async function processUrl(value, autoDownload=false) {
     msg("Fetching media info...");
 
     const r = await fetch("/api/inspect", {
-      method: "POST",
+      method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: value })
+      body:    JSON.stringify({ url: value })
     });
     const d = await r.json();
     updateQ();
 
-    if (r.status===503 && d.type==="queue-full")
-      throw new Error(`Server busy (${d.queueSize} waiting). Try in 30 seconds.`);
-    if (r.status===408)
+    if (r.status === 503 && d.type === "queue-full")
+      throw new Error(`Server busy (${d.queueSize} waiting). Please try in 30 seconds.`);
+    if (r.status === 408)
       throw new Error("Request timed out. Please try again.");
-    if (!r.ok||!d.ok) throw new Error(d.message||"Could not process this link.");
+    if (!r.ok || !d.ok) throw new Error(d.message || "Could not process this link.");
     if (!d.id) throw new Error("Server error. Please try again.");
 
     current = d;
-    name.textContent = d.filename || "media.mp4";
-    meta.textContent = (d.contentType||"media").replace("video/","").toUpperCase() +
-      (d.size ? " • "+sizeStr(d.size) : "");
+    mediaName.textContent = d.filename || "media.mp4";
+    meta.textContent =
+      (d.contentType || "media").replace("video/","").toUpperCase() +
+      (d.size ? " • " + sizeStr(d.size) : "");
     showPreview(d);
-    download.href = buildDlUrl(d);
-    download.setAttribute("download", d.filename||"QuickSave_Media.mp4");
+    downloadBtn.href = buildDlUrl(d);
+    downloadBtn.setAttribute("download", d.filename || "QuickSave_Media.mp4");
     result.classList.remove("hide");
     msg("Ready! Tap the button below to download.", "ok");
 
@@ -565,7 +480,7 @@ async function processUrl(value, autoDownload=false) {
 
   } catch(e) {
     console.error(e);
-    msg("❌ " + (e.message||"Something went wrong."), "err");
+    msg("❌ " + (e.message || "Something went wrong."), "err");
   } finally {
     go.disabled = false;
     autoProc    = false;
@@ -575,35 +490,58 @@ async function processUrl(value, autoDownload=false) {
 }
 
 /* ════════════════════════════════════════
-   NORMAL DOWNLOAD
+   DOWNLOAD - Normal flow
+   Blob download - no Chrome notification
 ════════════════════════════════════════ */
-function startDownload(d) {
-  saveHistory({ id:d.id, name:d.filename||"media.mp4", type:d.contentType||"media", time:Date.now() });
+async function startDownload(d) {
   progress.classList.remove("hide");
   if (adAfterDl && !isAdsOff()) adAfterDl.classList.remove("hide");
-  progressText.textContent = "Starting download...";
-  bar.style.width          = "10%";
-  progressPct.textContent  = "10%";
+  progressText.textContent = "Downloading...";
+  bar.style.width          = "20%";
+  progressPct.textContent  = "20%";
 
   if (isIOS()) {
+    /* iOS - direct link */
     window.location.href = buildDlUrl(d);
-  } else {
-    const a = document.createElement("a");
-    a.href  = buildDlUrl(d);
-    a.download = d.filename || "QuickSave_Media.mp4";
-    a.style.cssText = "position:fixed;top:-999px;";
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => { try { document.body.removeChild(a); } catch {} }, 2000);
+    setTimeout(() => {
+      bar.style.width          = "100%";
+      progressPct.textContent  = "100%";
+      progressText.textContent = "Tap and hold the video to save to Photos.";
+    }, 800);
+    return;
   }
 
-  setTimeout(() => {
+  try {
+    /* Fetch file as blob - no Chrome download manager */
+    bar.style.width         = "40%";
+    progressPct.textContent = "40%";
+
+    const response = await fetch(buildDlUrl(d));
+    if (!response.ok) throw new Error(`Download failed (${response.status})`);
+
+    bar.style.width         = "80%";
+    progressPct.textContent = "80%";
+
+    const ct     = (response.headers.get("content-type") || "video/mp4").split(";")[0].trim();
+    const buffer = await response.arrayBuffer();
+
+    /* Smart filename */
+    const savedName = await saveFileToDevice(buffer, d.filename || "QuickSave_video.mp4", ct);
+    const sizeMB    = (buffer.byteLength / 1024 / 1024).toFixed(1);
+
     bar.style.width          = "100%";
     progressPct.textContent  = "100%";
-    progressText.textContent = isIOS()
-      ? "Tap and hold the video to save to Photos."
-      : "Check your Downloads folder.";
-  }, 800);
+    progressText.textContent = `✅ "${savedName}" saved to Downloads!`;
+    msg("✅ Video saved!", "ok");
+
+    /* Save notification */
+    await showSaveNotification(savedName, sizeMB);
+
+  } catch(e) {
+    console.error("[download]", e.message);
+    progressText.textContent = "Download failed. Please try again.";
+    msg("❌ " + e.message, "err");
+  }
 }
 
 function triggerDownload(d) {
@@ -630,7 +568,7 @@ function showPreview(d) {
 }
 
 /* ════════════════════════════════════════
-   INPUT BUTTONS
+   BUTTONS
 ════════════════════════════════════════ */
 paste.onclick = async () => {
   try {
@@ -662,7 +600,7 @@ url.onkeydown = e => {
   }
 };
 
-download.addEventListener("click", e => {
+downloadBtn.addEventListener("click", e => {
   if (!current?.id) return;
   e.preventDefault();
   if (isPWA() && !isAdsOff()) showAd(() => startDownload(current));
@@ -707,7 +645,7 @@ install.onclick = async () => {
 if (iosDismiss) {
   iosDismiss.onclick = () => {
     iosInstall?.classList.add("hidden");
-    localStorage.setItem("qs_ios_dismissed","true");
+    localStorage.setItem("qs_ios_dismissed", "true");
   };
 }
 
@@ -729,9 +667,8 @@ if ("serviceWorker" in navigator) {
       });
 
       navigator.serviceWorker.addEventListener("controllerchange", () => location.reload());
-
       setupSWMessages();
-      setInterval(() => swReg.update(), 5*60*1000);
+      setInterval(() => swReg.update(), 5 * 60 * 1000);
 
     } catch(e) { console.log("[SW] Failed:", e); }
   });
@@ -752,20 +689,6 @@ async function onStartup() {
 
   const params = new URLSearchParams(location.search);
 
-  /* Notification click - app was closed */
-  const qs_media = params.get("qs_media");
-  const qs_fn    = params.get("qs_fn");
-  if (qs_media && qs_fn) {
-    history.replaceState({}, "", "/");
-    setTimeout(() => {
-      fallbackServerDownload(
-        decodeURIComponent(qs_media),
-        decodeURIComponent(qs_fn)
-      );
-    }, 800);
-    return;
-  }
-
   /* Share target */
   const shared = (
     params.get("url") || params.get("text") || params.get("title") || ""
@@ -778,6 +701,12 @@ async function onStartup() {
     return;
   }
 
+  if (params.get("action") === "paste") {
+    history.replaceState({}, "", "/");
+    setTimeout(() => paste.onclick?.(), 300);
+    return;
+  }
+
   /* Auto paste */
   if (isAutoOn()) {
     const auto = await tryAutoPaste();
@@ -787,8 +716,6 @@ async function onStartup() {
       return;
     }
   }
-
-  renderHistory();
 }
 
 /* ════════════════════════════════════════
