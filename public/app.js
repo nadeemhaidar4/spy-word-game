@@ -1,5 +1,5 @@
-/* QuickSave app.js v8.6 */
-console.log("QuickSave v8.6 loaded");
+/* QuickSave app.js v8.7 */
+console.log("QuickSave v8.7 loaded");
 
 const AD_DISABLE_CODE = "666666";
 const $ = id => document.getElementById(id);
@@ -87,22 +87,19 @@ function msg(t, c="") {
 }
 
 /* ════════════════════════════════════════
-   SMART FILENAME
-   Same name → video_1.mp4, video_2.mp4
+   SMART FILENAME - Auto rename duplicates
 ════════════════════════════════════════ */
 function getSmartFilename(filename) {
   const key       = "qs_dl_names";
   const usedNames = JSON.parse(localStorage.getItem(key) || "{}");
   const now       = Date.now();
 
-  /* 24 hours se purane entries clean karo */
   Object.keys(usedNames).forEach(k => {
     if (now - usedNames[k] > 24 * 60 * 60 * 1000) delete usedNames[k];
   });
 
   const ext  = filename.match(/\.[a-z0-9]+$/i)?.[0] || ".mp4";
   const base = filename.replace(/\.[a-z0-9]+$/i, "");
-
   let finalName = filename;
   let counter   = 0;
 
@@ -117,10 +114,10 @@ function getSmartFilename(filename) {
 }
 
 /* ════════════════════════════════════════
-   SAVE FILE TO DEVICE
+   SAVE FILE
    Blob URL → a.click()
-   Chrome automatically shows "Download complete"
-   No extra notification needed from our side
+   Chrome shows "Download complete" naturally
+   We show NO extra notification
 ════════════════════════════════════════ */
 async function saveFileToDevice(buffer, filename, contentType) {
   if (!buffer || buffer.byteLength < 1000) {
@@ -145,7 +142,6 @@ async function saveFileToDevice(buffer, filename, contentType) {
   document.body.appendChild(a);
   a.click();
 
-  /* Cleanup */
   setTimeout(() => {
     try { document.body.removeChild(a); } catch {}
     URL.revokeObjectURL(blobUrl);
@@ -266,19 +262,16 @@ function setupSWMessages() {
       return;
     }
 
-    /* SW ne file bheja - save karo */
+    /* File ready - save karo */
     if (d.type === "SAVE_FILE") {
-      console.log("[App] Saving file:", d.filename);
+      console.log("[App] Got file:", d.filename, d.sizeMB+"MB");
       showBg(`Saving ${d.filename}...`, "downloading", "⬇");
 
       try {
         const savedName = await saveFileToDevice(d.buffer, d.filename, d.contentType);
-
-        /* App ke andar status update - NO notification */
         showBg(`✅ "${savedName}" saved!`, "ok", "✅");
         msg("✅ Video saved to Downloads!", "ok");
         hideBg(6000);
-
       } catch(e) {
         console.error("[App] Save failed:", e.message);
         showBg(`Save failed: ${e.message}`, "err", "❌");
@@ -289,12 +282,25 @@ function setupSWMessages() {
 }
 
 /* ════════════════════════════════════════
+   TELL SW WE ARE VISIBLE
+   Jab app visible ho - SW ko batao
+   SW pending file send karega agar koi hai
+════════════════════════════════════════ */
+function notifySWVisible() {
+  if (!swReg?.active) return;
+  try {
+    swReg.active.postMessage({ type: "CLIENT_VISIBLE" });
+  } catch {}
+}
+
+/* ════════════════════════════════════════
    BACKGROUND DOWNLOAD
 ════════════════════════════════════════ */
 async function startBgDownload(pageUrl) {
   if (!swReg?.active) return false;
 
   const dlId = `dl_${Date.now()}`;
+
   swReg.active.postMessage({
     type: "BG_DOWNLOAD",
     data: { url: pageUrl, id: dlId }
@@ -333,16 +339,16 @@ function showAd(cb) {
   const t = setInterval(() => {
     s--;
     if (adTimerEl) adTimerEl.textContent = s;
-    if (s <= 0) { clearInterval(t); close(); cb?.(); }
+    if (s <= 0) { clearInterval(t); closeAd(); cb?.(); }
   }, 1000);
-  function close() {
+  function closeAd() {
     clearInterval(t);
     interstitialAd.classList.add("hide");
     document.body.style.overflow = "";
   }
-  if (closeBtn) closeBtn.onclick = () => { close(); cb?.(); };
+  if (closeBtn) closeBtn.onclick = () => { closeAd(); cb?.(); };
   interstitialAd.onclick = e => {
-    if (e.target === interstitialAd) { close(); cb?.(); }
+    if (e.target === interstitialAd) { closeAd(); cb?.(); }
   };
 }
 
@@ -453,9 +459,6 @@ async function processUrl(value, autoDownload=false) {
 
 /* ════════════════════════════════════════
    DOWNLOAD
-   Fetch as blob → a.click()
-   Chrome shows its own "Download complete"
-   We do NOT show any extra notification
 ════════════════════════════════════════ */
 async function startDownload(d) {
   progress.classList.remove("hide");
@@ -494,8 +497,6 @@ async function startDownload(d) {
     progressPct.textContent  = "100%";
     progressText.textContent = `✅ "${savedName}" saved to Downloads!`;
     msg("✅ Video saved!", "ok");
-
-    /* NO notification - Chrome already shows "Download complete" */
 
   } catch(e) {
     console.error("[download]", e.message);
@@ -644,6 +645,9 @@ async function onStartup() {
   updateQ();
   setInterval(updateQ, 30000);
 
+  /* SW ko batao hum visible hain - pending file check */
+  setTimeout(() => notifySWVisible(), 1000);
+
   if (isIOS() && !isStandalone() && !localStorage.getItem("qs_ios_dismissed"))
     setTimeout(() => iosInstall?.classList.remove("hidden"), 3000);
 
@@ -656,7 +660,8 @@ async function onStartup() {
 
   if (shared && isSupportedUrl(shared)) {
     history.replaceState({}, "", "/");
-    await new Promise(r => setTimeout(r, 600));
+    /* SW ready hone ka thoda wait */
+    await new Promise(r => setTimeout(r, 800));
     await handleShare(shared);
     return;
   }
@@ -679,10 +684,17 @@ async function onStartup() {
 }
 
 /* ════════════════════════════════════════
-   VISIBILITY CHANGE
+   VISIBILITY CHANGE - KEY FIX
+   Jab user wapas aaye - SW ko batao
+   Pending file agar ho to mil jayegi
 ════════════════════════════════════════ */
 document.addEventListener("visibilitychange", async () => {
-  if (document.visibilityState !== "visible" || autoProc) return;
+  if (document.visibilityState !== "visible") return;
+
+  /* SW ko batao visible hain - pending file bheje */
+  notifySWVisible();
+
+  if (autoProc) return;
 
   swReg?.update();
   checkVersion();
