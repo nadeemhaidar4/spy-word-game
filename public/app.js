@@ -1,5 +1,5 @@
-/* QuickSave app.js v8.5 */
-console.log("QuickSave v8.5 loaded");
+/* QuickSave app.js v8.6 */
+console.log("QuickSave v8.6 loaded");
 
 const AD_DISABLE_CODE = "666666";
 const $ = id => document.getElementById(id);
@@ -87,16 +87,15 @@ function msg(t, c="") {
 }
 
 /* ════════════════════════════════════════
-   SMART FILENAME - Auto rename if exists
-   video.mp4 → video_1.mp4 → video_2.mp4
+   SMART FILENAME
+   Same name → video_1.mp4, video_2.mp4
 ════════════════════════════════════════ */
 function getSmartFilename(filename) {
-  /* localStorage mein track karo */
   const key       = "qs_dl_names";
   const usedNames = JSON.parse(localStorage.getItem(key) || "{}");
+  const now       = Date.now();
 
-  /* Clean old entries (24 hours se purane) */
-  const now = Date.now();
+  /* 24 hours se purane entries clean karo */
   Object.keys(usedNames).forEach(k => {
     if (now - usedNames[k] > 24 * 60 * 60 * 1000) delete usedNames[k];
   });
@@ -107,30 +106,27 @@ function getSmartFilename(filename) {
   let finalName = filename;
   let counter   = 0;
 
-  /* Already exist karta hai? Counter badhao */
   while (usedNames[finalName]) {
     counter++;
     finalName = `${base}_${counter}${ext}`;
   }
 
-  /* Mark as used */
   usedNames[finalName] = now;
   localStorage.setItem(key, JSON.stringify(usedNames));
-
   return finalName;
 }
 
 /* ════════════════════════════════════════
    SAVE FILE TO DEVICE
-   Blob URL use karo - NO Chrome download
-   manager notification
+   Blob URL → a.click()
+   Chrome automatically shows "Download complete"
+   No extra notification needed from our side
 ════════════════════════════════════════ */
 async function saveFileToDevice(buffer, filename, contentType) {
   if (!buffer || buffer.byteLength < 1000) {
-    throw new Error("Invalid file data");
+    throw new Error("Invalid file data received");
   }
 
-  /* Smart filename - no duplicate */
   const smartName = getSmartFilename(filename);
   const mimeType  = contentType?.startsWith("video/") ? contentType
     : contentType?.startsWith("audio/") ? contentType
@@ -139,54 +135,23 @@ async function saveFileToDevice(buffer, filename, contentType) {
   const blob    = new Blob([buffer], { type: mimeType });
   const blobUrl = URL.createObjectURL(blob);
 
-  console.log("[save]", smartName, (blob.size/1024/1024).toFixed(2)+"MB", mimeType);
+  console.log("[save]", smartName, (blob.size/1024/1024).toFixed(2)+"MB");
 
-  try {
-    const a         = document.createElement("a");
-    a.href          = blobUrl;
-    a.download      = smartName;
-    a.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
+  const a         = document.createElement("a");
+  a.href          = blobUrl;
+  a.download      = smartName;
+  a.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
 
-    document.body.appendChild(a);
-    a.click();
+  document.body.appendChild(a);
+  a.click();
 
-    /* Cleanup after browser picks it up */
-    await new Promise(r => setTimeout(r, 3000));
+  /* Cleanup */
+  setTimeout(() => {
     try { document.body.removeChild(a); } catch {}
     URL.revokeObjectURL(blobUrl);
-
-  } catch(e) {
-    URL.revokeObjectURL(blobUrl);
-    throw e;
-  }
+  }, 5000);
 
   return smartName;
-}
-
-/* ════════════════════════════════════════
-   SHOW SAVE NOTIFICATION
-   Browser notification - sirf save hone par
-════════════════════════════════════════ */
-async function showSaveNotification(filename, sizeMB) {
-  if (!("Notification" in window)) return;
-  if (Notification.permission !== "granted") return;
-
-  try {
-    /* SW ke through notification - PWA icon use hoga */
-    if (swReg) {
-      await swReg.showNotification("✅ Video Saved!", {
-        body:    `${filename} (${sizeMB}MB) saved to Downloads`,
-        icon:    "/icon-192.png",
-        badge:   "/icon-192.png",
-        tag:     "qs-saved",       /* Same tag - replace old */
-        silent:  false,
-        vibrate: [200],
-        data:    { type: "saved" }
-      });
-    }
-  } catch(e) {
-    console.log("[notif] Failed:", e.message);
-  }
 }
 
 /* ════════════════════════════════════════
@@ -210,10 +175,11 @@ function hideBg(ms=0) {
 async function updateQ() {
   try {
     const d = await fetch("/api/queue").then(r=>r.json());
-    if (!queueStatus||!queueText) return;
-    if (d.processing>0||d.waiting>0) {
+    if (!queueStatus || !queueText) return;
+    if (d.processing > 0 || d.waiting > 0) {
       queueStatus.classList.remove("hide");
-      queueText.textContent = d.available ? "Server ready"
+      queueText.textContent = d.available
+        ? "Server ready"
         : `${d.processing} processing, ${d.waiting} waiting`;
     } else {
       queueStatus.classList.add("hide");
@@ -222,14 +188,58 @@ async function updateQ() {
 }
 
 /* ════════════════════════════════════════
-   NOTIFICATION PERMISSION
+   AD MANAGEMENT
 ════════════════════════════════════════ */
-async function askNotif() {
-  if (!("Notification" in window)) return false;
-  if (Notification.permission === "granted") return true;
-  if (Notification.permission === "denied")  return false;
-  return (await Notification.requestPermission()) === "granted";
+function isAdsOff() { return localStorage.getItem("qs_ads_disabled") === "true"; }
+function setAdsOff(v) {
+  localStorage.setItem("qs_ads_disabled", v ? "true" : "false");
+  applyAds();
 }
+function applyAds() {
+  const off = isAdsOff();
+  document.querySelectorAll(".ad-wrap,.interstitial-overlay,[data-ad]")
+    .forEach(el => el.classList.toggle("ads-hidden", off));
+  if (adCodeMsg) {
+    adCodeMsg.textContent = off ? "✅ Ads disabled" : "";
+    adCodeMsg.className   = off ? "code-msg ok" : "code-msg";
+  }
+}
+adCodeBtn?.addEventListener("click", () => {
+  const c = (adCodeInput?.value || "").trim();
+  if (c === AD_DISABLE_CODE) {
+    setAdsOff(true);
+    if (adCodeMsg) {
+      adCodeMsg.textContent = "✅ Ads disabled!";
+      adCodeMsg.className   = "code-msg ok";
+    }
+  } else if (c === "000000") {
+    setAdsOff(false);
+    if (adCodeMsg) {
+      adCodeMsg.textContent = "Ads enabled.";
+      adCodeMsg.className   = "code-msg";
+    }
+  } else {
+    if (adCodeMsg) {
+      adCodeMsg.textContent = "❌ Invalid code.";
+      adCodeMsg.className   = "code-msg err";
+    }
+  }
+  if (adCodeInput) adCodeInput.value = "";
+});
+adCodeInput?.addEventListener("keydown", e => {
+  if (e.key === "Enter") adCodeBtn?.click();
+});
+
+/* ════════════════════════════════════════
+   AUTO TOGGLE
+════════════════════════════════════════ */
+function isAutoOn() { return localStorage.getItem("qs_auto") !== "false"; }
+function setAuto(v) {
+  localStorage.setItem("qs_auto", v ? "true" : "false");
+  autoToggle.checked    = v;
+  autoLabel.textContent = v ? "Auto ON" : "Auto OFF";
+}
+autoToggle.addEventListener("change", () => setAuto(autoToggle.checked));
 
 /* ════════════════════════════════════════
    SW MESSAGES
@@ -240,7 +250,6 @@ function setupSWMessages() {
   navigator.serviceWorker.addEventListener("message", async event => {
     const d = event.data || {};
 
-    /* Background status */
     if (d.type === "BG_STATUS") {
       switch(d.status) {
         case "processing":
@@ -257,29 +266,24 @@ function setupSWMessages() {
       return;
     }
 
-    /* File ready - SW sent buffer */
+    /* SW ne file bheja - save karo */
     if (d.type === "SAVE_FILE") {
-      console.log("[App] Got file:", d.filename);
+      console.log("[App] Saving file:", d.filename);
       showBg(`Saving ${d.filename}...`, "downloading", "⬇");
 
       try {
         const savedName = await saveFileToDevice(d.buffer, d.filename, d.contentType);
-        const sizeMB    = (d.buffer?.byteLength / 1024 / 1024).toFixed(1);
 
+        /* App ke andar status update - NO notification */
         showBg(`✅ "${savedName}" saved!`, "ok", "✅");
         msg("✅ Video saved to Downloads!", "ok");
-
-        /* Notification - sirf save hone par */
-        await showSaveNotification(savedName, sizeMB);
-
-        hideBg(8000);
+        hideBg(6000);
 
       } catch(e) {
         console.error("[App] Save failed:", e.message);
         showBg(`Save failed: ${e.message}`, "err", "❌");
         hideBg(5000);
       }
-      return;
     }
   });
 }
@@ -289,9 +293,6 @@ function setupSWMessages() {
 ════════════════════════════════════════ */
 async function startBgDownload(pageUrl) {
   if (!swReg?.active) return false;
-
-  /* Notification permission - sirf save notification ke liye */
-  await askNotif();
 
   const dlId = `dl_${Date.now()}`;
   swReg.active.postMessage({
@@ -321,49 +322,6 @@ async function handleShare(sharedUrl) {
 }
 
 /* ════════════════════════════════════════
-   AD MANAGEMENT
-════════════════════════════════════════ */
-function isAdsOff() { return localStorage.getItem("qs_ads_disabled") === "true"; }
-function setAdsOff(v) {
-  localStorage.setItem("qs_ads_disabled", v ? "true" : "false");
-  applyAds();
-}
-function applyAds() {
-  const off = isAdsOff();
-  document.querySelectorAll(".ad-wrap,.interstitial-overlay,[data-ad]")
-    .forEach(el => el.classList.toggle("ads-hidden", off));
-  if (adCodeMsg) {
-    adCodeMsg.textContent = off ? "✅ Ads disabled" : "";
-    adCodeMsg.className   = off ? "code-msg ok" : "code-msg";
-  }
-}
-adCodeBtn?.addEventListener("click", () => {
-  const c = (adCodeInput?.value || "").trim();
-  if (c === AD_DISABLE_CODE) {
-    setAdsOff(true);
-    if (adCodeMsg) { adCodeMsg.textContent = "✅ Ads disabled!"; adCodeMsg.className = "code-msg ok"; }
-  } else if (c === "000000") {
-    setAdsOff(false);
-    if (adCodeMsg) { adCodeMsg.textContent = "Ads enabled."; adCodeMsg.className = "code-msg"; }
-  } else {
-    if (adCodeMsg) { adCodeMsg.textContent = "❌ Invalid code."; adCodeMsg.className = "code-msg err"; }
-  }
-  if (adCodeInput) adCodeInput.value = "";
-});
-adCodeInput?.addEventListener("keydown", e => { if (e.key==="Enter") adCodeBtn?.click(); });
-
-/* ════════════════════════════════════════
-   AUTO TOGGLE
-════════════════════════════════════════ */
-function isAutoOn() { return localStorage.getItem("qs_auto") !== "false"; }
-function setAuto(v) {
-  localStorage.setItem("qs_auto", v ? "true" : "false");
-  autoToggle.checked    = v;
-  autoLabel.textContent = v ? "Auto ON" : "Auto OFF";
-}
-autoToggle.addEventListener("change", () => setAuto(autoToggle.checked));
-
-/* ════════════════════════════════════════
    INTERSTITIAL AD
 ════════════════════════════════════════ */
 function showAd(cb) {
@@ -383,11 +341,13 @@ function showAd(cb) {
     document.body.style.overflow = "";
   }
   if (closeBtn) closeBtn.onclick = () => { close(); cb?.(); };
-  interstitialAd.onclick = e => { if (e.target===interstitialAd) { close(); cb?.(); } };
+  interstitialAd.onclick = e => {
+    if (e.target === interstitialAd) { close(); cb?.(); }
+  };
 }
 
 /* ════════════════════════════════════════
-   UPDATE BANNER
+   UPDATE
 ════════════════════════════════════════ */
 function showUpdateBanner() {
   updateBanner?.classList.remove("hide");
@@ -460,8 +420,10 @@ async function processUrl(value, autoDownload=false) {
       throw new Error(`Server busy (${d.queueSize} waiting). Please try in 30 seconds.`);
     if (r.status === 408)
       throw new Error("Request timed out. Please try again.");
-    if (!r.ok || !d.ok) throw new Error(d.message || "Could not process this link.");
-    if (!d.id) throw new Error("Server error. Please try again.");
+    if (!r.ok || !d.ok)
+      throw new Error(d.message || "Could not process this link.");
+    if (!d.id)
+      throw new Error("Server error. Please try again.");
 
     current = d;
     mediaName.textContent = d.filename || "media.mp4";
@@ -490,18 +452,20 @@ async function processUrl(value, autoDownload=false) {
 }
 
 /* ════════════════════════════════════════
-   DOWNLOAD - Normal flow
-   Blob download - no Chrome notification
+   DOWNLOAD
+   Fetch as blob → a.click()
+   Chrome shows its own "Download complete"
+   We do NOT show any extra notification
 ════════════════════════════════════════ */
 async function startDownload(d) {
   progress.classList.remove("hide");
   if (adAfterDl && !isAdsOff()) adAfterDl.classList.remove("hide");
+
   progressText.textContent = "Downloading...";
-  bar.style.width          = "20%";
-  progressPct.textContent  = "20%";
+  bar.style.width          = "15%";
+  progressPct.textContent  = "15%";
 
   if (isIOS()) {
-    /* iOS - direct link */
     window.location.href = buildDlUrl(d);
     setTimeout(() => {
       bar.style.width          = "100%";
@@ -512,30 +476,26 @@ async function startDownload(d) {
   }
 
   try {
-    /* Fetch file as blob - no Chrome download manager */
-    bar.style.width         = "40%";
-    progressPct.textContent = "40%";
+    bar.style.width         = "30%";
+    progressPct.textContent = "30%";
 
     const response = await fetch(buildDlUrl(d));
     if (!response.ok) throw new Error(`Download failed (${response.status})`);
 
-    bar.style.width         = "80%";
-    progressPct.textContent = "80%";
+    bar.style.width         = "75%";
+    progressPct.textContent = "75%";
 
     const ct     = (response.headers.get("content-type") || "video/mp4").split(";")[0].trim();
     const buffer = await response.arrayBuffer();
 
-    /* Smart filename */
     const savedName = await saveFileToDevice(buffer, d.filename || "QuickSave_video.mp4", ct);
-    const sizeMB    = (buffer.byteLength / 1024 / 1024).toFixed(1);
 
     bar.style.width          = "100%";
     progressPct.textContent  = "100%";
     progressText.textContent = `✅ "${savedName}" saved to Downloads!`;
     msg("✅ Video saved!", "ok");
 
-    /* Save notification */
-    await showSaveNotification(savedName, sizeMB);
+    /* NO notification - Chrome already shows "Download complete" */
 
   } catch(e) {
     console.error("[download]", e.message);
