@@ -1,10 +1,9 @@
-/* QuickSave app.js v8.3 */
-console.log("QuickSave v8.3 loaded");
+/* QuickSave app.js v8.4 */
+console.log("QuickSave v8.4 loaded");
 
 const AD_DISABLE_CODE = "666666";
 const $ = id => document.getElementById(id);
 
-/* ── DOM Elements ── */
 const url            = $("url"),
       paste          = $("paste"),
       go             = $("go"),
@@ -48,8 +47,8 @@ let lastUrl       = "";
 let swReg         = null;
 let newSW         = null;
 
-/* ── Download guard: ek baar hi trigger ho ── */
-let dlInProgress = false;
+/* Pending file data - SW se aaya buffer */
+let pendingFile = null;
 
 /* ════════════════════════════════════════
    UTILS
@@ -145,8 +144,8 @@ function showBg(text, type="processing", icon="⏳") {
   bgStatus.className = `bg-status ${type}`;
   bgStatus.classList.remove("hide");
 }
-function hideBg(delay=0) {
-  if (delay) setTimeout(() => bgStatus?.classList.add("hide"), delay);
+function hideBg(ms=0) {
+  if (ms) setTimeout(() => bgStatus?.classList.add("hide"), ms);
   else bgStatus?.classList.add("hide");
 }
 
@@ -160,8 +159,7 @@ async function updateQ() {
     if (d.processing>0||d.waiting>0) {
       queueStatus.classList.remove("hide");
       queueText.textContent = d.available
-        ? `✅ Server ready`
-        : `🔄 ${d.processing} processing, ${d.waiting} waiting`;
+        ? "Server ready" : `${d.processing} processing, ${d.waiting} waiting`;
     } else {
       queueStatus.classList.add("hide");
     }
@@ -171,7 +169,7 @@ async function updateQ() {
 /* ════════════════════════════════════════
    NOTIFICATION PERMISSION
 ════════════════════════════════════════ */
-async function askNotifPerm() {
+async function askNotif() {
   if (!("Notification" in window)) return false;
   if (Notification.permission === "granted") return true;
   if (Notification.permission === "denied")  return false;
@@ -179,192 +177,252 @@ async function askNotifPerm() {
 }
 
 /* ════════════════════════════════════════
-   CORE: AUTO DOWNLOAD FROM CACHE
+   SAVE FILE - Core Function
    
-   SW ne video store ki → yahan blob banao
-   → a.click() → browser native download
+   Browser mein file save karna:
+   1. showSaveFilePicker (modern Chrome) - user chooses location
+   2. Blob URL + hidden link (fallback) - Downloads folder
    
-   KEY FIX: Content-Type "video/mp4" set karo
-   taki browser HTML nahi, video download kare
+   IMPORTANT: NO a.click() on normal anchor
+   Use createObjectURL with proper MIME
 ════════════════════════════════════════ */
-let autoDownloadDone = new Set(); // Double trigger prevent
+const savedFiles = new Set();
 
-async function autoDownloadFromCache(cacheKey, filename, calledFromSW=false) {
-  /* Double download prevent karo */
-  const key = cacheKey + filename;
-  if (autoDownloadDone.has(key)) {
-    console.log("[auto-dl] Already done, skipping:", filename);
+async function saveFileToDevice(buffer, filename, contentType) {
+  /* Duplicate guard */
+  const fileKey = filename + "_" + (buffer?.byteLength || 0);
+  if (savedFiles.has(fileKey)) {
+    console.log("[save] Already saved, skip:", filename);
     return;
   }
-  autoDownloadDone.add(key);
+  savedFiles.add(fileKey);
+  setTimeout(() => savedFiles.delete(fileKey), 60000);
 
-  /* 30 sec baad reset karo */
-  setTimeout(() => autoDownloadDone.delete(key), 30000);
+  console.log("[save] Saving:", filename, (buffer?.byteLength/1024/1024).toFixed(2)+"MB");
 
-  console.log("[auto-dl] Starting:", filename, "| cache:", cacheKey);
-  showBg(`⬇ Saving ${filename}…`, "downloading", "⬇");
+  /* Validate buffer */
+  if (!buffer || buffer.byteLength < 1000) {
+    throw new Error("Invalid file data received");
+  }
+
+  const mimeType = contentType?.startsWith("video/") ? contentType : "video/mp4";
+  const blob     = new Blob([buffer], { type: mimeType });
+
+  console.log("[save] Blob:", blob.size, "bytes | type:", blob.type);
+
+  /* Method 1: File System Access API (Chrome 86+, no extra notification) */
+  if ("showSaveFilePicker" in window) {
+    try {
+      const ext = filename.match(/\.[a-z0-9]+$/i)?.[0] || ".mp4";
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{
+          description: "Video File",
+          accept: { [mimeType]: [ext] }
+        }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      console.log("[save] ✓ File System API success");
+      return;
+    } catch(e) {
+      /* User cancelled - don't fallback silently */
+      if (e.name === "AbortError") {
+        console.log("[save] User cancelled save dialog");
+        throw new Error("Save cancelled by user");
+      }
+      console.log("[save] File System API failed:", e.message, "| Trying fallback...");
+    }
+  }
+
+  /* Method 2: Blob URL download (Downloads folder - no Chrome notification) */
+  const blobUrl = URL.createObjectURL(blob);
 
   try {
-    /* SW cache se video fetch karo */
-    const response = await fetch(cacheKey);
+    const a      = document.createElement("a");
+    a.href       = blobUrl;
+    a.download   = filename; /* This triggers download, no navigation */
+    a.rel        = "noopener";
 
-    if (!response.ok) {
-      throw new Error(`Cache expired or not found (${response.status})`);
-    }
-
-    /* Content-Type check */
-    const ct = response.headers.get("content-type") || "video/mp4";
-    console.log("[auto-dl] Content-Type:", ct, "| Size:", response.headers.get("content-length"));
-
-    /* ArrayBuffer se Blob banao - sahi MIME type ke saath */
-    const bytes    = await response.arrayBuffer();
-    const mimeType = ct.startsWith("video/") ? ct : "video/mp4";
-    const blob     = new Blob([bytes], { type: mimeType });
-
-    console.log("[auto-dl] Blob size:", (blob.size/1024/1024).toFixed(2), "MB | type:", blob.type);
-
-    if (blob.size < 1000) {
-      throw new Error("Downloaded file is too small — may be corrupted");
-    }
-
-    /* Blob URL → a.click() */
-    const blobUrl  = URL.createObjectURL(blob);
-    const a        = document.createElement("a");
-    a.href         = blobUrl;
-    a.download     = filename;
-    a.style.display = "none";
-
+    /* Must be in DOM for Firefox */
+    a.style.cssText = "position:fixed;top:-999px;left:-999px;";
     document.body.appendChild(a);
+
+    /* Single click - no double trigger */
     a.click();
 
-    /* Cleanup */
     setTimeout(() => {
-      URL.revokeObjectURL(blobUrl);
       try { document.body.removeChild(a); } catch {}
-    }, 5000);
+      URL.revokeObjectURL(blobUrl);
+    }, 3000);
 
-    showBg(`✅ Saved! Check Downloads folder.`, "ok", "✅");
-    msg("✅ Video saved to Downloads!", "ok");
-
-    /* History */
-    saveHistory({
-      id:   "local_" + Date.now(),
-      name: filename,
-      type: mimeType,
-      time: Date.now()
-    });
-
-    hideBg(8000);
-    console.log("[auto-dl] ✓ Done:", filename);
-
+    console.log("[save] ✓ Blob download triggered:", filename);
   } catch(e) {
-    console.error("[auto-dl] Failed:", e.message);
-    autoDownloadDone.delete(key); // Reset on error
-    showBg(`❌ Save failed: ${e.message}`, "err", "❌");
-    hideBg(6000);
+    URL.revokeObjectURL(blobUrl);
+    throw e;
   }
 }
 
 /* ════════════════════════════════════════
-   SW MESSAGE LISTENER
+   SW MESSAGE HANDLER
 ════════════════════════════════════════ */
 function setupSWMessages() {
   if (!("serviceWorker" in navigator)) return;
 
   navigator.serviceWorker.addEventListener("message", async event => {
     const d = event.data || {};
-    console.log("[SW→App]", d.type, d.status||"");
+    console.log("[SW→App]", d.type, d.status || "");
 
     /* Background status updates */
     if (d.type === "BG_STATUS") {
       switch(d.status) {
         case "processing":
-          showBg("⏳ Processing video… Aap wapas ja sakte hain!", "processing", "⏳");
+          showBg("Processing your video...", "processing", "⏳");
           break;
         case "downloading":
-          showBg(`⬇ Downloading ${d.filename||"video"}…`, "downloading", "⬇");
+          showBg(`Downloading ${d.filename || "video"}...`, "downloading", "⬇");
           break;
         case "error":
-          showBg(`❌ ${d.msg||"Failed"}`, "err", "❌");
+          showBg(d.msg || "Download failed", "err", "❌");
           hideBg(6000);
           break;
       }
       return;
     }
 
-    /* Auto download trigger - SW ne file store kar li */
-    if (d.type === "AUTO_DOWNLOAD") {
-      if (d.cacheKey && d.filename) {
-        await autoDownloadFromCache(d.cacheKey, d.filename, true);
+    /* SW sent file buffer - save immediately */
+    if (d.type === "SAVE_FILE") {
+      console.log("[App] Got SAVE_FILE:", d.filename, d.sizeMB+"MB");
+
+      /* Store for notification click fallback */
+      pendingFile = {
+        buffer:      d.buffer,
+        filename:    d.filename,
+        contentType: d.contentType,
+        id:          d.id,
+        receivedAt:  Date.now()
+      };
+
+      showBg(`Saving ${d.filename}...`, "downloading", "⬇");
+
+      try {
+        await saveFileToDevice(d.buffer, d.filename, d.contentType);
+        showBg(`Video saved to Downloads!`, "ok", "✅");
+        msg("✅ Video saved successfully!", "ok");
+
+        saveHistory({
+          id:   "bg_" + Date.now(),
+          name: d.filename,
+          type: d.contentType || "video/mp4",
+          time: Date.now()
+        });
+
+        hideBg(8000);
+      } catch(e) {
+        if (e.message !== "Save cancelled by user") {
+          showBg(`Save failed: ${e.message}`, "err", "❌");
+          hideBg(6000);
+        } else {
+          showBg("Save cancelled.", "err", "❌");
+          hideBg(3000);
+        }
       }
       return;
     }
 
-    /* Notification click se navigate */
-    if (d.type === "OPEN_DL") {
-      if (d.cacheKey && d.filename) {
-        await autoDownloadFromCache(d.cacheKey, d.filename, true);
+    /* Notification was clicked - trigger download */
+    if (d.type === "NOTIF_CLICKED") {
+      console.log("[App] Notification clicked, mediaId:", d.mediaId);
+
+      /* Pending file available hai? */
+      if (pendingFile &&
+          Date.now() - pendingFile.receivedAt < 5 * 60 * 1000) {
+        showBg(`Saving ${pendingFile.filename}...`, "downloading", "⬇");
+        try {
+          await saveFileToDevice(
+            pendingFile.buffer,
+            pendingFile.filename,
+            pendingFile.contentType
+          );
+          showBg("Video saved to Downloads!", "ok", "✅");
+          msg("✅ Video saved!", "ok");
+          hideBg(8000);
+        } catch(e) {
+          /* Fallback to server download */
+          fallbackServerDownload(d.mediaId, d.filename);
+        }
+        return;
       }
+
+      /* No pending file - server se download */
+      fallbackServerDownload(d.mediaId, d.filename);
       return;
     }
   });
 }
 
+/* ── Server se direct download (fallback) ── */
+function fallbackServerDownload(mediaId, filename) {
+  if (!mediaId) return;
+  console.log("[App] Fallback server download:", mediaId);
+  showBg(`Downloading ${filename}...`, "downloading", "⬇");
+
+  const a = document.createElement("a");
+  a.href  = `/api/download?id=${encodeURIComponent(mediaId)}`;
+  a.download = filename || "QuickSave_video.mp4";
+  a.style.cssText = "position:fixed;top:-999px;left:-999px;";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try { document.body.removeChild(a); } catch {}
+    showBg("Check your Downloads folder.", "ok", "✅");
+    hideBg(5000);
+  }, 1000);
+}
+
 /* ════════════════════════════════════════
    BACKGROUND DOWNLOAD START
-   Share → QuickSave → SW ko message
 ════════════════════════════════════════ */
 async function startBgDownload(pageUrl) {
-  if (!swReg?.active) {
-    console.log("[BG] No SW active");
-    return false;
-  }
+  if (!swReg?.active) return false;
 
-  const hasNotif = await askNotifPerm();
-  if (!hasNotif) {
-    console.log("[BG] No notification permission");
-    return false;
-  }
+  const hasNotif = await askNotif();
+  if (!hasNotif) return false;
 
   const dlId = `dl_${Date.now()}`;
-
   swReg.active.postMessage({
     type: "BG_DOWNLOAD",
     data: { url: pageUrl, id: dlId }
   });
 
-  showBg("⏳ Processing… Aap wapas ja sakte hain!", "processing", "⏳");
-  msg("⏳ Background mein ho raha hai!", "ok");
-
+  showBg("Processing your video. You can go back to your app!", "processing", "⏳");
   return true;
 }
 
 /* ════════════════════════════════════════
-   SHARE TARGET HANDLER
+   SHARE TARGET
 ════════════════════════════════════════ */
 async function handleShare(sharedUrl) {
   if (!isSupportedUrl(sharedUrl)) {
     msg("Only Instagram, Facebook, Twitter/X links supported.", "err");
     return;
   }
-
   url.value = sharedUrl;
 
-  /* PWA + SW available = background download */
   if (isPWA() && swReg?.active) {
     const ok = await startBgDownload(sharedUrl);
-    if (ok) return; /* Background mein gaya, user wapas ja sakta hai */
+    if (ok) return;
   }
 
-  /* Fallback: normal flow */
   await processUrl(sharedUrl, true);
 }
 
 /* ════════════════════════════════════════
    INTERSTITIAL AD
 ════════════════════════════════════════ */
-function showAd(callback) {
-  if (isAdsOff() || !interstitialAd) { callback?.(); return; }
+function showAd(cb) {
+  if (isAdsOff() || !interstitialAd) { cb?.(); return; }
   interstitialAd.classList.remove("hide");
   document.body.style.overflow = "hidden";
   let s = 5;
@@ -372,36 +430,35 @@ function showAd(callback) {
   const t = setInterval(() => {
     s--;
     if (adTimerEl) adTimerEl.textContent = s;
-    if (s <= 0) { clearInterval(t); close(); callback?.(); }
+    if (s <= 0) { clearInterval(t); close(); cb?.(); }
   }, 1000);
   function close() {
     clearInterval(t);
     interstitialAd.classList.add("hide");
     document.body.style.overflow = "";
   }
-  if (closeBtn) closeBtn.onclick = () => { close(); callback?.(); };
-  interstitialAd.onclick = e => { if (e.target===interstitialAd) { close(); callback?.(); } };
+  if (closeBtn) closeBtn.onclick = () => { close(); cb?.(); };
+  interstitialAd.onclick = e => { if (e.target===interstitialAd) { close(); cb?.(); } };
 }
 
 /* ════════════════════════════════════════
    UPDATE
 ════════════════════════════════════════ */
 function showUpdateBanner() {
-  if (!updateBanner) return;
-  updateBanner.classList.remove("hide");
+  updateBanner?.classList.remove("hide");
   $("updateNowBtn")?.addEventListener("click", () => {
     newSW?.postMessage({ type: "SKIP_WAITING" });
-    updateBanner.classList.add("hide");
+    updateBanner?.classList.add("hide");
   }, { once: true });
 }
 async function checkVersion() {
   try {
-    const d = await fetch("/api/version?t=" + Date.now()).then(r=>r.json());
-    const stored = localStorage.getItem("qs_sv");
-    if (stored && stored !== d.version) {
+    const d = await fetch("/api/version?t="+Date.now()).then(r=>r.json());
+    const sv = localStorage.getItem("qs_sv");
+    if (sv && sv !== d.version) {
       localStorage.setItem("qs_sv", d.version);
       const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
+      await Promise.all(keys.map(k=>caches.delete(k)));
       location.reload(true);
     } else {
       localStorage.setItem("qs_sv", d.version);
@@ -423,15 +480,15 @@ function renderHistory() {
   if (!h.length) { historyPanel.classList.add("hide"); return; }
   historyPanel.classList.remove("hide");
   historyEl.innerHTML = h.map(x => {
-    const href = x.id?.startsWith("local_") ? "#"
-      : (x.id ? escH(`/api/download?id=${x.id}`) : "#");
-    const dlAttr = x.id?.startsWith("local_") ? "" : `download="${escH(x.name||"media")}"`;
+    const isBg   = x.id?.startsWith("bg_") || x.id?.startsWith("local_");
+    const href   = isBg ? "#" : escH(`/api/download?id=${x.id}`);
+    const dlAttr = isBg ? "" : `download="${escH(x.name||"media")}"`;
     return `<div class="historyrow">
       <div>
         <b>${escH(x.name||"media")}</b>
         <small>${escH(x.type||"media")} • ${new Date(x.time).toLocaleString()}</small>
       </div>
-      <a href="${href}" ${dlAttr}>↓ Save</a>
+      <a href="${href}" ${dlAttr}>${isBg?"✓ Saved":"↓ Save"}</a>
     </div>`;
   }).join("");
 }
@@ -441,7 +498,7 @@ $("clearHistory").onclick = () => {
 };
 
 /* ════════════════════════════════════════
-   AUTO PASTE
+   CLIPBOARD AUTO PASTE
 ════════════════════════════════════════ */
 async function tryAutoPaste() {
   if (!isAutoOn()) return null;
@@ -453,7 +510,7 @@ async function tryAutoPaste() {
 }
 
 /* ════════════════════════════════════════
-   MAIN PROCESS (Normal - not background)
+   MAIN PROCESS (Normal flow)
 ════════════════════════════════════════ */
 async function processUrl(value, autoDownload=false) {
   if (!value || autoProc) return;
@@ -462,45 +519,45 @@ async function processUrl(value, autoDownload=false) {
     return;
   }
 
-  autoProc     = true;
-  lastUrl      = value;
-  url.value    = value;
-  go.disabled  = true;
+  autoProc    = true;
+  lastUrl     = value;
+  url.value   = value;
+  go.disabled = true;
   result.classList.add("hide");
   progress.classList.add("hide");
   adAfterDl?.classList.add("hide");
 
   const btnTxt = [...go.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);
-  if (btnTxt) btnTxt.textContent = "Checking… ";
+  if (btnTxt) btnTxt.textContent = "Checking... ";
   updateQ();
 
   try {
-    msg("⏳ Fetching media info…");
+    msg("Fetching media info...");
 
     const r = await fetch("/api/inspect", {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ url: value })
+      body: JSON.stringify({ url: value })
     });
     const d = await r.json();
     updateQ();
 
     if (r.status===503 && d.type==="queue-full")
-      throw new Error(`🔴 Server busy (${d.queueSize} waiting). Try in 30s.`);
+      throw new Error(`Server busy (${d.queueSize} waiting). Try in 30 seconds.`);
     if (r.status===408)
-      throw new Error("⏱️ Timeout. Try again.");
-    if (!r.ok||!d.ok) throw new Error(d.message||"Could not process link.");
-    if (!d.id)        throw new Error("Server error.");
+      throw new Error("Request timed out. Please try again.");
+    if (!r.ok||!d.ok) throw new Error(d.message||"Could not process this link.");
+    if (!d.id) throw new Error("Server error. Please try again.");
 
     current = d;
-    name.textContent = d.filename||"media.mp4";
+    name.textContent = d.filename || "media.mp4";
     meta.textContent = (d.contentType||"media").replace("video/","").toUpperCase() +
       (d.size ? " • "+sizeStr(d.size) : "");
     showPreview(d);
     download.href = buildDlUrl(d);
     download.setAttribute("download", d.filename||"QuickSave_Media.mp4");
     result.classList.remove("hide");
-    msg("✅ Ready! Tap download.", "ok");
+    msg("Ready! Tap the button below to download.", "ok");
 
     if (autoDownload && isAutoOn()) {
       setTimeout(() => triggerDownload(d), 600);
@@ -508,7 +565,7 @@ async function processUrl(value, autoDownload=false) {
 
   } catch(e) {
     console.error(e);
-    msg("❌ "+(e.message||"Something went wrong."), "err");
+    msg("❌ " + (e.message||"Something went wrong."), "err");
   } finally {
     go.disabled = false;
     autoProc    = false;
@@ -518,44 +575,41 @@ async function processUrl(value, autoDownload=false) {
 }
 
 /* ════════════════════════════════════════
-   DOWNLOAD (Normal flow)
+   NORMAL DOWNLOAD
 ════════════════════════════════════════ */
 function startDownload(d) {
-  const dlUrl = buildDlUrl(d);
   saveHistory({ id:d.id, name:d.filename||"media.mp4", type:d.contentType||"media", time:Date.now() });
   progress.classList.remove("hide");
   if (adAfterDl && !isAdsOff()) adAfterDl.classList.remove("hide");
-  progressText.textContent = "Starting download…";
+  progressText.textContent = "Starting download...";
   bar.style.width          = "10%";
   progressPct.textContent  = "10%";
 
   if (isIOS()) {
-    window.location.href = dlUrl;
+    window.location.href = buildDlUrl(d);
   } else {
     const a = document.createElement("a");
-    a.href = dlUrl; a.download = d.filename||"QuickSave_Media.mp4";
-    a.style.display = "none";
+    a.href  = buildDlUrl(d);
+    a.download = d.filename || "QuickSave_Media.mp4";
+    a.style.cssText = "position:fixed;top:-999px;";
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => document.body.removeChild(a), 2000);
+    setTimeout(() => { try { document.body.removeChild(a); } catch {} }, 2000);
   }
 
   setTimeout(() => {
     bar.style.width          = "100%";
     progressPct.textContent  = "100%";
     progressText.textContent = isIOS()
-      ? "✅ Tap & hold to save to Photos."
-      : "✅ Check your Downloads folder.";
+      ? "Tap and hold the video to save to Photos."
+      : "Check your Downloads folder.";
   }, 800);
 }
 
 function triggerDownload(d) {
   if (!d?.id) return;
-  if (isPWA() && !isAdsOff()) {
-    showAd(() => startDownload(d));
-  } else {
-    startDownload(d);
-  }
+  if (isPWA() && !isAdsOff()) showAd(() => startDownload(d));
+  else startDownload(d);
 }
 
 /* ════════════════════════════════════════
@@ -566,17 +620,17 @@ function showPreview(d) {
   thumb.onclick   = () => window.open(`/api/download?id=${d.id}&inline=1`, "_blank");
   if (d.thumbnail) {
     const img = new Image();
-    img.src = d.thumbnail;
+    img.src   = d.thumbnail;
     img.style.cssText = "width:100%;height:100%;object-fit:cover;border-radius:12px;";
     img.onload  = () => thumb.appendChild(img);
-    img.onerror = () => (thumb.innerHTML = "<span>▶</span>");
+    img.onerror = () => { thumb.innerHTML = "<span>▶</span>"; };
   } else {
     thumb.innerHTML = "<span>▶</span>";
   }
 }
 
 /* ════════════════════════════════════════
-   BUTTONS
+   INPUT BUTTONS
 ════════════════════════════════════════ */
 paste.onclick = async () => {
   try {
@@ -584,13 +638,13 @@ paste.onclick = async () => {
     if (t) {
       url.value = t;
       paste.textContent = "✓ Pasted";
-      setTimeout(() => (paste.textContent="Paste"), 1500);
+      setTimeout(() => (paste.textContent = "Paste"), 1500);
       if (isAutoOn() && isSupportedUrl(t)) processUrl(t, true);
     } else {
-      msg("Clipboard is empty.", "err");
+      msg("Clipboard is empty. Copy a link first.", "err");
     }
   } catch {
-    msg("Clipboard unavailable. Paste manually.", "err");
+    msg("Clipboard unavailable. Please paste manually.", "err");
     url.focus();
   }
 };
@@ -600,8 +654,9 @@ go.onclick = () => {
   if (!v) return msg("Please paste a media URL first.", "err");
   processUrl(v, false);
 };
+
 url.onkeydown = e => {
-  if (e.key==="Enter") {
+  if (e.key === "Enter") {
     const v = url.value.trim();
     if (v) processUrl(v, isAutoOn() && isSupportedUrl(v));
   }
@@ -629,7 +684,8 @@ if (retryBtn) retryBtn.onclick = e => {
   drop.addEventListener(ev, x => { x.preventDefault(); drop.classList.remove("drag"); })
 );
 drop.addEventListener("drop", e => {
-  const t = e.dataTransfer.getData("text/plain")||e.dataTransfer.getData("text/uri-list");
+  const t = e.dataTransfer.getData("text/plain") ||
+            e.dataTransfer.getData("text/uri-list");
   if (t) processUrl(t.trim(), isAutoOn() && isSupportedUrl(t.trim()));
 });
 
@@ -656,7 +712,7 @@ if (iosDismiss) {
 }
 
 /* ════════════════════════════════════════
-   SERVICE WORKER REGISTER
+   SERVICE WORKER
 ════════════════════════════════════════ */
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
@@ -667,7 +723,7 @@ if ("serviceWorker" in navigator) {
       swReg.addEventListener("updatefound", () => {
         newSW = swReg.installing;
         newSW.addEventListener("statechange", () => {
-          if (newSW.state==="installed" && navigator.serviceWorker.controller)
+          if (newSW.state === "installed" && navigator.serviceWorker.controller)
             showUpdateBanner();
         });
       });
@@ -691,53 +747,42 @@ async function onStartup() {
   updateQ();
   setInterval(updateQ, 30000);
 
-  /* iOS banner */
   if (isIOS() && !isStandalone() && !localStorage.getItem("qs_ios_dismissed"))
     setTimeout(() => iosInstall?.classList.remove("hidden"), 3000);
 
   const params = new URLSearchParams(location.search);
 
-  /* ── Case 1: Notification click se aaya (app band thi) ── */
-  const qs_ck = params.get("qs_ck");
-  const qs_fn = params.get("qs_fn");
-  const qs_dl = params.get("qs_dl");
-
-  if (qs_ck && qs_fn) {
+  /* Notification click - app was closed */
+  const qs_media = params.get("qs_media");
+  const qs_fn    = params.get("qs_fn");
+  if (qs_media && qs_fn) {
     history.replaceState({}, "", "/");
-    /* SW ready hone ka wait karo */
-    setTimeout(async () => {
-      await autoDownloadFromCache(
-        decodeURIComponent(qs_ck),
+    setTimeout(() => {
+      fallbackServerDownload(
+        decodeURIComponent(qs_media),
         decodeURIComponent(qs_fn)
       );
-    }, 1000);
+    }, 800);
     return;
   }
 
-  /* ── Case 2: Share target ── */
+  /* Share target */
   const shared = (
     params.get("url") || params.get("text") || params.get("title") || ""
   ).trim();
 
   if (shared && isSupportedUrl(shared)) {
     history.replaceState({}, "", "/");
-    await new Promise(r => setTimeout(r, 600)); /* SW ready wait */
+    await new Promise(r => setTimeout(r, 600));
     await handleShare(shared);
     return;
   }
 
-  /* ── Case 3: Action param ── */
-  if (params.get("action") === "paste") {
-    history.replaceState({}, "", "/");
-    setTimeout(() => paste.onclick?.(), 300);
-    return;
-  }
-
-  /* ── Case 4: Auto paste from clipboard ── */
+  /* Auto paste */
   if (isAutoOn()) {
     const auto = await tryAutoPaste();
     if (auto) {
-      msg("🔗 URL detected!", "ok");
+      msg("Link detected. Processing...", "ok");
       await processUrl(auto, true);
       return;
     }
@@ -750,8 +795,7 @@ async function onStartup() {
    VISIBILITY CHANGE
 ════════════════════════════════════════ */
 document.addEventListener("visibilitychange", async () => {
-  if (document.visibilityState !== "visible") return;
-  if (autoProc) return;
+  if (document.visibilityState !== "visible" || autoProc) return;
 
   swReg?.update();
   checkVersion();
@@ -761,7 +805,7 @@ document.addEventListener("visibilitychange", async () => {
   await new Promise(r => setTimeout(r, 400));
   const auto = await tryAutoPaste();
   if (auto && auto !== url.value.trim()) {
-    msg("🔗 New URL detected!", "ok");
+    msg("New link detected. Processing...", "ok");
     await processUrl(auto, true);
   }
 });
